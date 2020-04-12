@@ -1776,12 +1776,12 @@ void logLogRelaxed_Q(int logFile, const char* format,  ...) {
 
                     uint8_t pos = c / 4;
                     
-                    uint8_t sub_pos = (c % 4)*2;
-
                     v = stop_tb_Q[pos];
-                    
+                    if(v){
+                    uint8_t sub_pos = (c % 4)*2;
                     v >>= sub_pos;
                     v &= 0x3;
+                    }
 
                 //}
             switch (v) {
