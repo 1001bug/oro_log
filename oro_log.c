@@ -9,7 +9,12 @@
 //#include <bits/stdio.h>
 
 
-
+/*
+ * добавление логов после старта oroWriter
+ * _unlocked versions
+ * remove oroObj anf oroLogFull, use oroLogFulla instead
+ * 
+ */
 
 
 #define _GNU_SOURCE
@@ -103,16 +108,11 @@ static struct timespec logOpenTime;
 static const size_t logLogFullObjBufLen = 2048;
 //static int time_source = CLOCK_ID_WALL_FAST; //global. same for all logs
 
+//not need any more
+static unsigned long logQueueSize(Poro_t logFile, void (*error_fun)(char *fstring,...));
 
 
-//static const char stop_tb[120]={0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,2,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1,0,0,0,1,1,1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1,0,0,0,0,0,0,0,0,1,0,1,1,1,1,1,0,1,0,0,0,0,1,1,1,0,0,1,0,1,0,0,1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0};
-//static const char stop_tb[255]={0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,2,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1,0,0,0,1,1,1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1,0,0,0,0,0,0,0,0,1,0,1,1,1,1,1,0,1,0,0,0,0,1,1,1,0,0,1,0,1,0,0,1};
-/*static const char stop_tb[255] __attribute__ ((aligned(sizeof(uintptr_t)))) = 
-{   0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
-    0,0,0,0,0,0,0,0,0,0,0,0,0,3,0,0,0,0,0,0,0,0,0,0,
-    0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1,0,0,0,1,1,1,
-    0,0,0,0,0,0,0,0,0,0,0,2,0,0,0,0,1,0,0,0,0,0,0,0,
-    0,1,0,1,1,1,1,1,0,1,0,0,0,0,1,1,1,0,0,2,0,1,0,0,1} ;*/
+
 
 static const uint8_t stop_tb[128] __attribute__ ((aligned(sizeof(uintptr_t)))) =
   {
@@ -149,7 +149,7 @@ static uint8_t stop_tb_Q[256/4] __attribute__ ((aligned(sizeof(uintptr_t)))) = {
 //inernal use only, degerous!
 //static int logCleaup();
 static int logCleaup(void (*error_fun)(char *fstring,...));
-static void logRedirect_stderr(PlogLog_t logFile, const char *funname, struct timespec time, const char* format, va_list ap);
+static void logRedirect_stderr(Poro_t logFile, const char *funname, struct timespec time, const char* format, va_list ap);
 //пока тут. куда дальше ее сунуть не знаю
 static int str_s_cpy(char *dest, const char *src, size_t sizeof_dest);
 static void prepare_Q();
@@ -196,7 +196,7 @@ typedef struct LOG_Q {
     
 } LOG_QUEUE __attribute__ ((aligned));
 
-//для целей autoflush
+
 struct FD_LIST_ITEM{
     FILE *FD;
     LOG_QUEUE QUEUE  __attribute__ ((aligned(sizeof(uintptr_t))));;
@@ -214,7 +214,7 @@ struct FD_LIST_ITEM{
 static struct FD_LIST_ITEM *FD_LIST = NULL;
 static volatile int FD_LIST_ITEM_NUM = 0;
 //lock FD_ARR. Block logOpen after log flusher start
-static pthread_mutex_t FD_ARR_mutex = PTHREAD_MUTEX_INITIALIZER;
+static pthread_mutex_t FD_LIST_mutex = PTHREAD_MUTEX_INITIALIZER;
 
 
 static pthread_t af_thread = 0;
@@ -229,20 +229,18 @@ static volatile long logFlushThreadStarted = 0;
 
 
 
-void logSetRequestForLogsTruncate(){
+void oroLogTruncate(){
     requestForLogsTruncate=1;
     return;
 }
 
-/*
- * функция гадит в STDERR!!! в двух местах
- */
-static void * logFlush_thread(void *S){
+
+static void * logWrite_thread(void *e_fun){
     //__suseconds_t usec_sleep = *(__suseconds_t *) S;
     __suseconds_t usec_sleep = logFlush_empty_queue_sleep ; //GLOBAL
     
     
-    void (*error_fun)(char *fstring,...) = S;
+    void (*error_fun)(char *fstring,...) = e_fun;
     
     char DATE_FORMAT_STRING[] __attribute__ ((aligned(sizeof(uintptr_t))))=      "00:00:00.000000000;;";
     const char date_format_string[] __attribute__ ((aligned(sizeof(uintptr_t))))="%02i:%02i:%02i.%%09li;;";
@@ -257,7 +255,7 @@ static void * logFlush_thread(void *S){
     
     //forbiden add new log files from thist point
     
-    pthread_mutex_lock(&FD_ARR_mutex);
+    pthread_mutex_lock(&FD_LIST_mutex);
 
 
     if (FD_LIST == NULL || FD_LIST_ITEM_NUM == 0) {
@@ -622,12 +620,12 @@ static void * logFlush_thread(void *S){
     //the only return point!!!
 logFlush_thread__exit:
     logFlushThreadStarted=0;
-    pthread_mutex_unlock(&FD_ARR_mutex);
+    pthread_mutex_unlock(&FD_LIST_mutex);
     
     return NULL;
 }
 
-int logFlushStart(int bind_cpu, void (*error_fun)(char *fstring, ...)) {
+int oroWriterStart(int bind_cpu, void (*error_fun)(char *fstring, ...)) {
     pthread_attr_t af_pth_attrs_r;
     
     prepare_Q();
@@ -679,7 +677,7 @@ int logFlushStart(int bind_cpu, void (*error_fun)(char *fstring, ...)) {
     assert(af_thread_startup_mutex_lock == 0);
     //&logFlush_empty_queue_sleep
     int r = 0;
-    if ((r=pthread_create(&af_thread, &af_pth_attrs_r, logFlush_thread, error_fun)) != 0) {
+    if ((r=pthread_create(&af_thread, &af_pth_attrs_r, logWrite_thread, error_fun)) != 0) {
         if (error_fun)error_fun(
                 ERR_MESSAGE("pthread_create logFlush_thread error %i: %s\n", r, strerror(r))
                 );
@@ -727,10 +725,11 @@ int logFlushStart(int bind_cpu, void (*error_fun)(char *fstring, ...)) {
 
 }
 
-int logFlushStop(__suseconds_t wait, void (*error_fun)(char *fstring,...)){
+int oroWriterStop(long int wait_usec, void (*error_fun)(char *fstring,...)){
 
     //check for logFlushThreadStarted=1 ????
 
+        __suseconds_t wait=wait_usec;
 
     
 
@@ -741,7 +740,7 @@ int logFlushStop(__suseconds_t wait, void (*error_fun)(char *fstring,...)){
 
 
 
-        while (pthread_mutex_trylock(&FD_ARR_mutex) != 0) {
+        while (pthread_mutex_trylock(&FD_LIST_mutex) != 0) {
 
             if (wait != 0) {
                 //если задана пауза - ждать один раз и обнулить ее. на след. круг сразу выйдем с -1
@@ -768,146 +767,28 @@ int logFlushStop(__suseconds_t wait, void (*error_fun)(char *fstring,...)){
         logCleaup(error_fun);
         
         
-        pthread_mutex_unlock(&FD_ARR_mutex);
+        pthread_mutex_unlock(&FD_LIST_mutex);
         
 
         return 0;
 
 
-
-
-
-
-        //pthread_cancel(af_thread);
-        //fprintf(stderr,"autoflush stoped\n");
-
-    /* else {
-        if (error_fun)error_fun("FILE %s, LINE %i, logAutoflush Flush thread discriptor problem!\n", __FILE__, __LINE__);
-        return -1;
-    }*/
     
 }
 
-//CPU AFFINITY!!!!!!!
-//start_stop = 'R'un 'S'top
-/*int logFlush(int cmd,__suseconds_t wait, char *cpu_list, void (*error_fun)(char *fstring,...)){ //передать сюда атрибуты для прибивки по ядрам. но как?????
 
-    
-    static int started = 0;
-    
-    assert_msg(cmd == 'R' || cmd == 'S', "Wrong cmd: 'R'un or 'S'top");
-
-    //start!
-    if(cmd == 'R' && started == 0){
-        
-        if(pthread_attr_init(&af_pth_attrs_r) != 0){
-            if(error_fun)error_fun("FILE %s, LINE %i, pthread_attr_init FAILed\n",__FILE__,__LINE__);
-            return -1;
-        }
-        
-        if(strlen(cpu_list)>0 && setCPUaffinity(&af_pth_attrs_r,cpu_list,error_fun) != 0){
-            if(error_fun)error_fun("FILE %s, LINE %i, logAutoflush setCPUaffinity FAILed\n",__FILE__,__LINE__);
-            //continue, not fatal
-        }
-        
-        //global
-        logFlush_empty_queue_wait = wait > 0 && wait < 900000? wait : logFlush_empty_queue_wait;
-        errno=0;
-        if (pthread_create(&af_thread, &af_pth_attrs_r, logFlush_thread, &logFlush_empty_queue_wait) != 0) {
-                if(error_fun)error_fun("FILE %s, LINE %i, pthread_create logAutoflush_thread error %i: %s\n",__FILE__,__LINE__,errno,strerror(errno));
-                return -1;
-                //FATAL!
-        }
-        {
-            int s = pthread_attr_destroy(&af_pth_attrs_r);
-            if (s != 0)
-                if(error_fun)error_fun("FILE %s, LINE %i, logAutoflush: pthread_attr_destroy: %i",s);
-        }
-        errno = 0;
-        if(pthread_setname_np(af_thread, "logAutoflush") != 0){
-            if(error_fun)error_fun("FILE %s, LINE %i, pthread_setname_np logAutoflush_thread error %i: %s\n",__FILE__,__LINE__,errno,strerror(errno));
-            //continue, not fatal
-        }
-        
-        started = 1;
-        return 0;
-        
-    }
-    //STOP!!
-    else if(cmd == 'S' && started == 1){
-        
-        if(af_thread){
-            
-            
-            for (int N = 0; N < FD_LIST_ITEM_NUM; N++) {
-                FD_ARR[N].insert_forbidden = 1;
-            }
-            
-            
-            
-            while (pthread_mutex_trylock(&FD_ARR_mutex) != 0) {
-
-                if (wait != 0) {
-                    //если задана пауза - ждать один раз и обнулить ее. на след. круг сразу выйдем с -1
-                    select(0, NULL, NULL, NULL, &((struct timeval){0, wait}));
-                    wait = 0;
-                } else   //logFlush still working
-                    return -1;
-
-            }
-            
-            //logFlush thread already finish (on exit it should unlock FD_ARR_mutex)
-            
-            //join наверно лишне, но вдруг там какая-то чистка делается, надо уточнить
-            errno = 0;
-            if (pthread_join(af_thread, NULL) != 0) {
-                if (error_fun)error_fun("FILE %s, LINE %i, pthread_join logAutoflush_thread error %i: %s\n", __FILE__, __LINE__, errno, strerror(errno));
-                //continue, not fatal
-            }
-            {
-                //Close all FD, free Q, io_buf, ...
-                int r = logCleaup();
-                if (error_fun)error_fun("FILE %s, LINE %i, logCleaup: %i\n", __FILE__, __LINE__, r);
-            }
-            
-            return 0;
-
-            
-            
-            
-            
-            
-            //pthread_cancel(af_thread);
-            //fprintf(stderr,"autoflush stoped\n");
-            
-        }else{
-            if(error_fun)error_fun("FILE %s, LINE %i, logAutoflush Flush thread discriptor problem!\n",__FILE__,__LINE__);
-            return -1;
-        }
-    }
-    
-    if(error_fun)error_fun("FILE %s, LINE %i, logAutoflush restarting or restopping!\n",__FILE__,__LINE__);
-    return -1;
-}*/
-
-unsigned long logQueueSize(PlogLog_t logFile, void (*error_fun)(char *fstring,...)){
+static unsigned long logQueueSize(Poro_t logFile, void (*error_fun)(char *fstring,...)){
     struct FD_LIST_ITEM *LOG=(struct FD_LIST_ITEM *)logFile;
     
     
     
     return (LOG->QUEUE.head == LOG->QUEUE.tail) ? (0) : (LOG->QUEUE.cnt_in-LOG->QUEUE.cnt_out);
-    //return    (FD_ARR[N].QUEUE.cnt_in-FD_ARR[N].QUEUE.cnt_out);
+    
     
 }
 
-
-int logCleaup(void (*error_fun)(char *fstring,...)){ //shuold be called ONLY from logFlush (STOP)
-    
-    
-    /*if (FD_LIST_ITEM_NUM == 0) {
-        fprintf(stderr,"FD_LIST_ITEM_NUM=0\n");
-            return 0;
-        }*/
+//DANGER!! ACHTUNG!!! shuold be called ONLY from logWriteSTOP
+static int logCleaup(void (*error_fun)(char *fstring,...)){ 
     
     
     for (struct FD_LIST_ITEM * LOG=FD_LIST;LOG;LOG=LOG->next) {
@@ -971,10 +852,13 @@ int logCleaup(void (*error_fun)(char *fstring,...)){ //shuold be called ONLY fro
     
     //race!!! if logLog* run same time
     FD_LIST_ITEM_NUM=0;
-    if (FD_LIST) {
-        free(FD_LIST);
-        FD_LIST = NULL;
+    for (struct FD_LIST_ITEM * LOG=FD_LIST;LOG;){
+        struct FD_LIST_ITEM *tmp=LOG=LOG->next;
+        free(LOG);
+        LOG=tmp;
     }
+        
+    
     
     
     
@@ -988,19 +872,9 @@ int logCleaup(void (*error_fun)(char *fstring,...)){ //shuold be called ONLY fro
 }
 
 
-PlogLog_t logOpen(log_attrs config, void (*error_fun)(char *fstring,...)){
+Poro_t oroLogOpen(oro_attrs_t config, void (*error_fun)(char *fstring,...)){
     
-    
-    //сделать мьютекс !!! чтобы не запустить LogOpen из двух мест сразу
-    
-    //и переделать на список!!!
-    
-    //нулевой эллемент пропустим. начинаем с 1-го
-    //static last_FD_LIST_ITEM_NUM=0;
-    
-    //повторно создавать лог файл неправильно!
-    
-    
+
     assert_msg(config.f_name_part1 !=NULL && strlen(config.f_name_part1)>0,"First part of file name MUST not be zero length");
 
     
@@ -1017,12 +891,12 @@ PlogLog_t logOpen(log_attrs config, void (*error_fun)(char *fstring,...)){
     
     //если запущен тред записи на диск, не блокировать вызывающиц тред, а вернуть ошибку
     //как быть с возможно параллельным запуском LogOpen?
-    int mtx = pthread_mutex_trylock(&FD_ARR_mutex);
+    int mtx = pthread_mutex_trylock(&FD_LIST_mutex);
     if(mtx != 0){
         if(error_fun)error_fun(
                 ERR_MESSAGE("Looks like flush thread already running or parallel LogOpen()\n")
                 );
-        return -1;
+        return NULL;
     }
     
     
@@ -1278,19 +1152,19 @@ PlogLog_t logOpen(log_attrs config, void (*error_fun)(char *fstring,...)){
     
     //the only exit point!!!!
     
-    pthread_mutex_unlock(&FD_ARR_mutex);
-    return (uintptr_t)LOG;
+    pthread_mutex_unlock(&FD_LIST_mutex);
+    return LOG;
 
 logOpen__exit:    
-    pthread_mutex_unlock(&FD_ARR_mutex);
+    pthread_mutex_unlock(&FD_LIST_mutex);
     return 0;
 }
 
 
-void logRedirect_stderr(PlogLog_t logFile, const char *funname, struct timespec time, const char* format, va_list ap){
+static void logRedirect_stderr(Poro_t logFile, const char *funname, struct timespec time, const char* format, va_list ap){
     //lock
     char *eformat;
-    if(asprintf(&eformat,"%li.%09li\t%s(%#lx): %s\n", time.tv_sec + timezone_offset, time.tv_nsec, funname, logFile, format) <0  ){
+    if(asprintf(&eformat,"%li.%09li\t%s(%p): %s\n", time.tv_sec + timezone_offset, time.tv_nsec, funname, logFile, format) <0  ){
         return;
     }else{
         
@@ -1303,15 +1177,17 @@ void logRedirect_stderr(PlogLog_t logFile, const char *funname, struct timespec 
     //unlock
 }
 
-/*
- * функция гадит в STDERR 
+/**
+ * Log format string with fixed numer of prameters. Only copyble params allowed! Do not log non static strings! Use macro oroLogFixedA to count NUM at compille time
+ * @param logFile
+ * @param NUM
+ * @param format
+ * @param ...
  */
-void logLogFixed(PlogLog_t logFile, size_t NUM, const char* format,  ...) { //вызывать как *file,(0|секунды),(0|микросекунды),"строка формата а-ля printf",переменный список аргументов
+void oroLogFixed(Poro_t logFile, size_t NUM, const char* format,  ...){
 
-    assert(logFile!=0);
+    assert(logFile!=NULL);
     assert_msg(NUM<=PARAMS_FIXED_NUM, "NUM is limited! MAX: " __STRING(PARAMS_FIXED_NUM));
-    //size_t is unsigned!
-    //assert_msg(NUM>=0, "NUM valid range is 0.." __STRING(PARAMS_FIXED_NUM));
     
     struct FD_LIST_ITEM *LOG=(struct FD_LIST_ITEM *)logFile;
     
@@ -1408,8 +1284,13 @@ void logLogFixed(PlogLog_t logFile, size_t NUM, const char* format,  ...) { //в
     
     
 }
-
-void logLogRelaxed(PlogLog_t logFile, const char* format,  ...) {
+/**
+ * Log format string with limited number of params, but counting at runtime and doing strdup() on %s
+ * @param logFile
+ * @param format
+ * @param ...
+ */
+void oroLogRelaxed(Poro_t logFile, const char* format,  ...) {
     
 
     assert(logFile!=0);
@@ -1538,6 +1419,8 @@ next:
 
     
 }
+
+
 static int char_spec_mean(char c){
         switch (c) {
                 case 'A':
@@ -1582,6 +1465,7 @@ static int char_spec_mean(char c){
         exit(EXIT_FAILURE);
 
 }
+
 static void prepare_Q(){
     //return;
     int jtb_index=0;
@@ -1604,8 +1488,13 @@ static void prepare_Q(){
         jtb_index++;
     }
 }
-
-void logLogRelaxed_Q(PlogLog_t logFile, const char* format,  ...) {
+/**
+ * Same as oroLogRelaxed. Differ in a way of parsing format string. Conmpact jump table 64 bites. It is slower but more chance to stay on cache line.
+ * @param logFile
+ * @param format
+ * @param ...
+ */
+void oroLogRelaxed_Q(Poro_t logFile, const char* format,  ...) {
     
     assert(logFile!=0);
     
@@ -1751,8 +1640,13 @@ next:
     
 }
 
-
-void logLogRelaxed_wojt(PlogLog_t logFile, const char* format,  ...) {
+/**
+ * Same as oroLogRelaxed but without jump table. Just switch with letters
+ * @param logFile
+ * @param format
+ * @param ...
+ */
+void oroLogRelaxed_wojt(Poro_t logFile, const char* format,  ...) {
     
 
     assert(logFile!=0);
@@ -1898,8 +1792,13 @@ next:
     
 }
 
-
-void logLogRelaxedDummy(PlogLog_t logFile, const char* format,  ...) { 
+/**
+ * Same as oroLogRelaxed testing purpose only
+ * @param logFile
+ * @param format
+ * @param ...
+ */
+void oroLogRelaxedDummy(Poro_t logFile, const char* format,  ...) { 
     
 
 
@@ -1981,10 +1880,13 @@ next:
 
     
 }
-#define NOT_IN_JUMP_RANGE(Ch) ((Ch) < '%' || (Ch) > 'x')
-#define CHAR_CLASS(Ch) (jump_table[(int) (Ch) - '%'])
-
-void logLogRelaxedDummy_wojt(PlogLog_t logFile, const char* format,  ...) { 
+/**
+ * Same as oroLogRelaxed testing purpose only
+ * @param logFile
+ * @param format
+ * @param ...
+ */
+void oroLogRelaxedDummy_wojt(Poro_t logFile, const char* format,  ...) { 
     
 
     assert(logFile!=0);
@@ -2009,16 +1911,7 @@ void logLogRelaxedDummy_wojt(PlogLog_t logFile, const char* format,  ...) {
         
         ++string;
         while(*string != '\0'){
-            //int n = stop_tb[*string];
-            //int c = (int)*string; 
-            //int v = NOT_IN_JUMP_RANGE (c) ? 0 : CHAR_CLASS (c);
             switch (*string) {
-                    /*case 0:
-                    {
-                        ++string;
-                        continue;
-                    }*/
-
                 case 'A':
                 case 'C':
                 case 'E':
@@ -2087,11 +1980,11 @@ next:
 }
 
 
-logObj * logLogFullObj(size_t bytes){
+oroObj_t * oroLogFullObj(size_t bytes){
     if(bytes == 0){
         bytes = logLogFullObjBufLen; //global Static 2048 bytes
     }
-    logObj *Obj = aligned_alloc(sizeof(uintptr_t), sizeof (logObj));
+    oroObj_t *Obj = aligned_alloc(sizeof(uintptr_t), sizeof (oroObj_t));
     assert_msg(Obj != NULL, "logObj aligned_alloc failed");
     Obj->buf = aligned_alloc(sizeof(uintptr_t), bytes);
     assert_msg(Obj->buf != NULL,"logObj buffer aligned_alloc failed");
@@ -2101,7 +1994,7 @@ logObj * logLogFullObj(size_t bytes){
     return Obj;
 }
 
-void logLogFullObjFree(logObj **Obj){
+void oroLogFullObjFree(oroObj_t **Obj){
     assert_msg(Obj != NULL, "Not valid Obj poiner");
     assert_msg(*Obj != NULL, "Not valid Obj. Already free?");
     
@@ -2116,7 +2009,14 @@ void logLogFullObjFree(logObj **Obj){
     return;
 }
 
-void logLogFull(PlogLog_t logFile, logObj *obj, const char* format,  ...) {
+/**
+ * Log by format string with unlimited number of parameters. Buffer preallocated in Object and expanding as needed
+ * @param logFile
+ * @param obj preallocated with oroLogFullObj() buffer
+ * @param format
+ * @param ...
+ */
+void oroLogFull(Poro_t logFile, oroObj_t *obj, const char* format,  ...) {
     
     assert(logFile!=0);
     struct FD_LIST_ITEM *LOG=(struct FD_LIST_ITEM *)logFile;
@@ -2187,10 +2087,13 @@ void logLogFull(PlogLog_t logFile, logObj *obj, const char* format,  ...) {
         assert_perror(errno);
         va_end(arglist);
         if (n >= obj->n) {
-            obj->n += logLogFullObjBufLen;
-            char *t = aligned_alloc(sizeof (uintptr_t), obj->n);
+            size_t need = n  -  obj->n  ;
+            //round to logLogFullObjBufLen + 1 for '\0'
+            size_t new_size = (((obj->n + need + 1)/logLogFullObjBufLen) + 1)*logLogFullObjBufLen;
+            char *t = aligned_alloc(sizeof (uintptr_t), new_size);
             assert_msg(t != NULL,"Obj buf expand aligned_alloc failed");
             obj->buf = t;
+            obj->n = new_size;
         } else {
             break;
         }
@@ -2231,8 +2134,125 @@ void logLogFull(PlogLog_t logFile, logObj *obj, const char* format,  ...) {
     
 }
 
+/**
+ * Log by format string with unlimited number of parameters. Buffer preallocated and expanding as needed
+ * @param logFile poinert to log
+ * @param expecting_byte preallocate buffer
+ * @param format
+ * @param ...
+ * @return lenght of buffer. may by ge expecting_byte
+ */
+size_t oroLogFulla(Poro_t logFile, size_t expecting_byte, const char* format,  ...){
+    
+    assert(logFile!=0);
+    struct FD_LIST_ITEM *LOG=(struct FD_LIST_ITEM *)logFile;
+    
+    Q_element *ENTRY;
+    LOG_QUEUE *Q;
+    
+    va_list arglist;
+    
+
+        struct timespec time={0};
+    
+    
+    if(LOG->time_source>=0)
+        clock_gettime(LOG->time_source,&time);
+
+
+    if(UNLIKELY(LOG->insert_forbidden == 1)){
+        
+        va_start(arglist, format);
+        logRedirect_stderr(logFile,__func__,time,format,arglist);
+        va_end(arglist);
+        
+        return expecting_byte;
+    }
+    
+    
+    Q = &(LOG->QUEUE);
+
+    
+#ifndef RETURN
+    ENTRY = aligned_alloc(sizeof(uintptr_t), sizeof (Q_element));
+#else
+    
+//несколько тредов будут разбирать список, нужна блокировка. это конечно неахти
+    pthread_spin_lock(&(Q->insert_lock));
+    
+    //есть а наличии следующий эллемент? берем текущий, а слежующий помечем хвостом
+    if(Q->return_tail->next){
+        ENTRY = Q->return_tail;
+        Q->return_tail = Q->return_tail->next;
+    }else{
+        ENTRY = aligned_alloc(sizeof(uintptr_t), sizeof (Q_element));
+#ifdef LOG_DEBUG        
+        fprintf(stderr,"RETURN Q EMPTY\n");
+#endif        
+    }
+    
+    pthread_spin_unlock(&(Q->insert_lock));
+    
+#endif        
+    
+    assert_msg(ENTRY != NULL,"Got non valid Queue element pointer");
+    memset(ENTRY,0,sizeof (Q_element));
+
+    int n=0;
+    
+    char *buf = aligned_alloc(sizeof(uintptr_t), expecting_byte);
+    
+    do {
+        va_start(arglist, format); //LAST PARAM!!!
+        errno = 0;
+        n = vsnprintf(buf, expecting_byte, format, arglist);
+        assert_perror(errno);
+        va_end(arglist);
+        if (n >= expecting_byte) {
+            size_t need = n  -  expecting_byte  ;
+            //round to logLogFullObjBufLen + 1 for '\0'
+            size_t new_size = (((expecting_byte + need + 1)/sizeof(uintptr_t)) + 1)*sizeof(uintptr_t);
+            char *t = aligned_alloc(sizeof (uintptr_t), new_size);
+            assert_msg(t != NULL,"Obj buf expand aligned_alloc failed");
+            buf = t;
+            expecting_byte = new_size;
+        } else {
+            break;
+        }
+
+    } while (1);
+    
+    assert_msg(n>0, "something wrong with vsnprintf");
+    
+    ENTRY->format_string=buf;
+    
+    ENTRY->num = -1; // need FREE on `format_string`
+    
+    ENTRY->realtime = time;
+    
+    
+    //if(1)
+    //    ENTRY->tid = pthread_self();
+    
+    pthread_spin_lock(&(Q->insert_lock));
+    
+    Q->head->next=ENTRY;
+    Q->head=ENTRY;
+    Q->cnt_in+=1;
+
+    pthread_spin_unlock(&(Q->insert_lock));
+
+    return expecting_byte;
+}
+
+/**
+ * simplified version of strscpy from Linux kernel source
+ * @param dest
+ * @param src
+ * @param sizeof_dest for sizeof(dest)
+ * @return coppyed num of chars or -1 if cropped
+ */
 static int str_s_cpy(char *dest, const char *src, size_t sizeof_dest) {
-//simplified version of strscpy from Linux kernel source
     
     int res = 0;
 

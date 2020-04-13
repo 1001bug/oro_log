@@ -39,7 +39,7 @@ extern "C" {
 
 #endif    
     
-    typedef uintptr_t PlogLog_t;
+    typedef void * Poro_t;
 
     typedef struct {
         int file_name_with_date;
@@ -59,36 +59,38 @@ extern "C" {
         size_t bufsize; //setvbuf
 
 
-    } log_attrs;
+    } oro_attrs_t;
 
     typedef struct {
         char *buf;
         size_t n;
-    } logObj;
+    } oroObj_t;
 
 
 
 
 
-    void logLogFixed(PlogLog_t logFile, size_t NUM, const char* format, ...);
-    void logLogRelaxed(PlogLog_t logFile, const char* format, ...);
-    void logLogRelaxed_wojt(PlogLog_t logFile, const char* format, ...);
-    void logLogRelaxedDummy(PlogLog_t logFile, const char* format, ...);
-    void logLogRelaxedDummy_wojt(PlogLog_t logFile, const char* format, ...);
-    void logLogRelaxed_Q(PlogLog_t logFile, const char* format, ...);
+    void oroLogFixed(Poro_t logFile, size_t NUM, const char* format, ...);
+    void oroLogRelaxed(Poro_t logFile, const char* format, ...);
+    void oroLogRelaxed_wojt(Poro_t logFile, const char* format, ...);
+    void oroLogRelaxedDummy(Poro_t logFile, const char* format, ...);
+    void oroLogRelaxedDummy_wojt(Poro_t logFile, const char* format, ...);
+    void oroLogRelaxed_Q(Poro_t logFile, const char* format, ...);
 
 
-    logObj * logLogFullObj(size_t bytes);
-    void logLogFullObjFree(logObj **Obj);
-    void logLogFull(PlogLog_t logFile, logObj *o, const char* format, ...);
-    void logSetRequestForLogsTruncate(); //все разом?
+    oroObj_t * oroLogFullObj(size_t bytes);
+    void oroLogFullObjFree(oroObj_t **Obj);
+    void oroLogFull(Poro_t logFile, oroObj_t *o, const char* format, ...);
+    size_t oroLogFulla(Poro_t logFile, size_t expecting_byte, const char* format,  ...);
+    
+    void oroLogTruncate(); //все разом?
 
-    int logFlushStart(int bind_cpu, void (*error_fun)(char *fstring, ...));
-    int logFlushStop(__suseconds_t wait, void (*error_fun)(char *fstring, ...));
-    PlogLog_t logOpen(log_attrs config, void (*error_fun)(char *fstring, ...));
+    int oroWriterStart(int bind_cpu, void (*error_fun)(char *fstring, ...));
+    int oroWriterStop(__suseconds_t wait, void (*error_fun)(char *fstring, ...));
+    Poro_t oroLogOpen(oro_attrs_t config, void (*error_fun)(char *fstring, ...));
 
     //Autocount args for N=1+  because some problem with ##__VA_ARGS__. In macro expand it everything ok, but in runtime 0 args gives count=1
-#define logLogFixedA(logFile,format,...) logLogFixed(logFile,COUNT_ARGS_( __VA_ARGS__  ,26,25,24,23,22,21,20,19,18,17,16,15,14,13,12,11,10,9,8,7,6,5,4,3,2,1,0),format, __VA_ARGS__)
+#define oroLogFixedA(logFile,format,...) oroLogFixed(logFile,COUNT_ARGS_( __VA_ARGS__  ,26,25,24,23,22,21,20,19,18,17,16,15,14,13,12,11,10,9,8,7,6,5,4,3,2,1,0),format, __VA_ARGS__)
 #define COUNT_ARGS_(a,b,c,d,e,f,g,h,i,j,k,l,m,n,o,p,q,r,s,t,u,v,w,x,y,z,cnt,...)    cnt
 
 
