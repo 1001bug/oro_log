@@ -101,7 +101,7 @@ static long timezone_offset;
 static struct timespec logOpenTime;
 //static volatile int endlessCycle = 1;
 static const size_t logLogFullObjBufLen = 2048;
-static int time_source = CLOCK_ID_WALL_FAST; //global. same for all logs
+//static int time_source = CLOCK_ID_WALL_FAST; //global. same for all logs
 
 
 
@@ -149,13 +149,14 @@ static uint8_t stop_tb_Q[256/4] __attribute__ ((aligned(sizeof(uintptr_t)))) = {
 //inernal use only, degerous!
 //static int logCleaup();
 static int logCleaup(void (*error_fun)(char *fstring,...));
-static void logRedirect_stderr(int logFile, const char *funname, struct timespec time, const char* format, va_list ap);
+static void logRedirect_stderr(PlogLog_t logFile, const char *funname, struct timespec time, const char* format, va_list ap);
 //пока тут. куда дальше ее сунуть не знаю
 static int str_s_cpy(char *dest, const char *src, size_t sizeof_dest);
 static void prepare_Q();
 //size_t const cache_line_size = 64; sysconf(_SC_LEVEL3_CACHE_LINESIZE)
 
 static volatile int requestForLogsTruncate = 0;
+
 
 
 typedef struct Q_element{
@@ -199,15 +200,18 @@ typedef struct LOG_Q {
 struct FD_LIST_ITEM{
     FILE *FD;
     LOG_QUEUE QUEUE  __attribute__ ((aligned(sizeof(uintptr_t))));;
-    struct FD_LIST_ITEM *next;
     char *custom_io_buf;
+    clockid_t time_source; //usualy no reason to use different time source
+    int timestamp_utc;     //utc is for mononic time source
+    struct FD_LIST_ITEM *next;
     
     volatile int insert_forbidden __attribute__ ((aligned(sizeof(uintptr_t))));
+    
     char log_filename[LOG_F_NAME_LEN];
     
 } __attribute__ ((aligned(sizeof(uintptr_t)))); 
 
-static struct FD_LIST_ITEM *FD_ARR = NULL;
+static struct FD_LIST_ITEM *FD_LIST = NULL;
 static volatile int FD_LIST_ITEM_NUM = 0;
 //lock FD_ARR. Block logOpen after log flusher start
 static pthread_mutex_t FD_ARR_mutex = PTHREAD_MUTEX_INITIALIZER;
@@ -256,7 +260,7 @@ static void * logFlush_thread(void *S){
     pthread_mutex_lock(&FD_ARR_mutex);
 
 
-    if (FD_ARR == NULL || FD_LIST_ITEM_NUM == 0) {
+    if (FD_LIST == NULL || FD_LIST_ITEM_NUM == 0) {
 
         //go to exit
         pthread_mutex_unlock(&af_thread_startup_mutex);
@@ -265,8 +269,8 @@ static void * logFlush_thread(void *S){
     
     
     //activate all logs
-    for (int N = 0; N < FD_LIST_ITEM_NUM; N++) {
-        FD_ARR[N].insert_forbidden = 0;
+    for (struct FD_LIST_ITEM * L=FD_LIST;L;L=L->next) {
+        L->insert_forbidden = 0;
     }
     
     logFlushThreadStarted=1;
@@ -275,17 +279,17 @@ static void * logFlush_thread(void *S){
     //ready to exit counter (+3 time get state: write=0 and all files are locked)
     int ready_to_exit = 0;
     
-    //has total limit of writes. divide by num of files
-    const long logFlush_lines_each_file = logFlush_lines_at_cycle / FD_LIST_ITEM_NUM;
     
     for(;;) {
+        //has total limit of writes. divide by num of files
+        const long logFlush_lines_each_file = logFlush_lines_at_cycle / FD_LIST_ITEM_NUM;
 
         
 
         if (UNLIKELY(requestForLogsTruncate)) {
             requestForLogsTruncate = 0;
-            for (int N = 0; N < FD_LIST_ITEM_NUM; N++) {
-                FILE *F = FD_ARR[N].FD;
+            for (struct FD_LIST_ITEM * LOG=FD_LIST;LOG;LOG=LOG->next) {
+                FILE *F = LOG->FD;
 
                 if (F) {
                     //такойспособ не обнуляет блокировку файла
@@ -293,14 +297,14 @@ static void * logFlush_thread(void *S){
                     if (fseek(F, 0, SEEK_SET) != 0) {
                         if(error_fun)
                             error_fun(ERR_MESSAGE("Log Truncate failed (rewind): %s\n", strerror(errno)));
-                        FD_ARR[N].insert_forbidden = 1;
+                        LOG->insert_forbidden = 1;
                     } else {
                         errno = 0;
                         if (ftruncate(fileno(F), 0) != 0) {
                             if(error_fun)
                                 error_fun(ERR_MESSAGE("Log Truncate failed (trunc): %s\n", strerror(errno)));
                             
-                            FD_ARR[N].insert_forbidden = 1;
+                            LOG->insert_forbidden = 1;
                         }
                     }
                 }
@@ -312,20 +316,22 @@ static void * logFlush_thread(void *S){
         long write_cnt = 0;
         int insert_forbidden_FD = 0;
 
-        __time_t prev_sec=0;
-        int hr=0;
-        int min=0;
-        int sec=0;
         
-        for (int N = 0; N < FD_LIST_ITEM_NUM; N++) {
-            FILE *F = FD_ARR[N].FD;
+        
+        for (struct FD_LIST_ITEM * LOG=FD_LIST;LOG;LOG=LOG->next) {
+            __time_t prev_sec=0;
+            int hr=0;
+            int min=0;
+            int sec=0;
             
-            if(FD_ARR[N].insert_forbidden)
+            FILE *F = LOG->FD;
+            
+            if(LOG->insert_forbidden)
                 insert_forbidden_FD+=1;
 
             //обратное условие проверим через три строки. там его надо каждый раз проверять
             
-            LOG_QUEUE *Q = &(FD_ARR[N].QUEUE);
+            LOG_QUEUE *Q = &(LOG->QUEUE);
 
             //счетчик чтобы в каждый файл писать по немного
             long write_limit_cnt = 0;
@@ -355,7 +361,7 @@ static void * logFlush_thread(void *S){
                     
                     prev_sec = E->realtime.tv_sec;
                             
-                    sec = (prev_sec + timezone_offset) % 86400; //секунд в последних судках. 24*60*60=86400
+                    sec = (prev_sec + (LOG->timestamp_utc?0:timezone_offset) ) % 86400; //секунд в последних судках. 24*60*60=86400
                     
                     min = sec / 60;
                     
@@ -400,7 +406,7 @@ static void * logFlush_thread(void *S){
 
                 //fputs_unlocked(DATE_FORMAT_STRING,F);
                 //вписать наносекунды
-                if (time_source >= 0)
+                if (LOG->time_source >= 0)
                     fprintf(F, DATE_FORMAT_STRING, E->realtime.tv_nsec);
 
 
@@ -589,21 +595,21 @@ static void * logFlush_thread(void *S){
                 error_fun(ERR_MESSAGE("clock_gettime FAILed: %s\n", strerror(errno)));
             
         }
-        if (Flush.tv_sec > prevFlush.tv_sec) {           //HARDCODE flsuh every 1 sec
-            for (int N = 0; N < FD_LIST_ITEM_NUM; N++)
-                if (FD_ARR[N].FD != NULL){
-                    errno=0;
-                    fputs_unlocked("#fflush\n",FD_ARR[N].FD);
-                    
-                    fflush_unlocked(FD_ARR[N].FD);
-                    if(errno)
-                    {
-                        if(error_fun)
+        if (Flush.tv_sec > prevFlush.tv_sec) { //HARDCODE flsuh every 1 sec
+            for (struct FD_LIST_ITEM * LOG = FD_LIST; LOG; LOG = LOG->next) {
+                if (LOG->FD != NULL) {
+                    errno = 0;
+                    fputs_unlocked("#fflush\n", LOG->FD);
+
+                    fflush_unlocked(LOG->FD);
+                    if (errno) {
+                        if (error_fun)
                             error_fun(
-                                    ERR_MESSAGE("fflush on %s: %s\n",FD_ARR[N].log_filename,strerror(errno))
-                                    );
+                                ERR_MESSAGE("fflush on %s: %s\n", LOG->log_filename, strerror(errno))
+                                );
                     }
                 }
+            }
             prevFlush.tv_sec = Flush.tv_sec + logFlush_fflush_sec;
         }
         
@@ -729,8 +735,8 @@ int logFlushStop(__suseconds_t wait, void (*error_fun)(char *fstring,...)){
     
 
 
-        for (int N = 0; N < FD_LIST_ITEM_NUM; N++) {
-            FD_ARR[N].insert_forbidden = 1;
+        for (struct FD_LIST_ITEM * LOG=FD_LIST;LOG;LOG=LOG->next) {
+            LOG->insert_forbidden = 1;
         }
 
 
@@ -884,19 +890,12 @@ int logFlushStop(__suseconds_t wait, void (*error_fun)(char *fstring,...)){
     return -1;
 }*/
 
-unsigned long logQueueSize(int logFile, void (*error_fun)(char *fstring,...)){
-    int N=logFile-1;
-    
-    if(N <0 || logFile > FD_LIST_ITEM_NUM){
-        if(error_fun)error_fun(
-                ERR_MESSAGE("wrong logFile: %i\n",logFile)
-                );
-        return -1;
-    }
+unsigned long logQueueSize(PlogLog_t logFile, void (*error_fun)(char *fstring,...)){
+    struct FD_LIST_ITEM *LOG=(struct FD_LIST_ITEM *)logFile;
     
     
     
-    return (FD_ARR[N].QUEUE.head == FD_ARR[N].QUEUE.tail) ? (0) : (FD_ARR[N].QUEUE.cnt_in-FD_ARR[N].QUEUE.cnt_out);
+    return (LOG->QUEUE.head == LOG->QUEUE.tail) ? (0) : (LOG->QUEUE.cnt_in-LOG->QUEUE.cnt_out);
     //return    (FD_ARR[N].QUEUE.cnt_in-FD_ARR[N].QUEUE.cnt_out);
     
 }
@@ -911,29 +910,29 @@ int logCleaup(void (*error_fun)(char *fstring,...)){ //shuold be called ONLY fro
         }*/
     
     
-    for (int N = 0; N < FD_LIST_ITEM_NUM; N++) {
+    for (struct FD_LIST_ITEM * LOG=FD_LIST;LOG;LOG=LOG->next) {
             //FILE *F = FD_ARR[N].FD;
-            LOG_QUEUE *Q = &(FD_ARR[N].QUEUE);
+            LOG_QUEUE *Q = &(LOG->QUEUE);
             
             //мы не должны попадать сюда с полной очередью
             assert_msg(Q->head==Q->head, "Cleanup non empty Queue");
             
-            if(FD_ARR[N].FD){
-            fprintf(FD_ARR[N].FD, "#Closed %s.\n",FD_ARR[N].QUEUE.cnt_in==FD_ARR[N].QUEUE.cnt_out?"normally":" truncated. IN<>OUT"   );
+            if(LOG->FD){
+            fprintf(LOG->FD, "#Closed %s.\n",LOG->QUEUE.cnt_in==LOG->QUEUE.cnt_out?"normally":" truncated. IN<>OUT"   );
             
             errno=0;
-            if(fflush(FD_ARR[N].FD) != 0){
+            if(fflush(LOG->FD) != 0){
                 if(error_fun)
-                    error_fun(ERR_MESSAGE("fflush on %s: %s\n",FD_ARR[N].log_filename,strerror(errno))
+                    error_fun(ERR_MESSAGE("fflush on %s: %s\n",LOG->log_filename,strerror(errno))
                             );
             }
             errno=0;
-            if(fclose(FD_ARR[N].FD) != 0){
+            if(fclose(LOG->FD) != 0){
                 if(error_fun)
-                    error_fun(ERR_MESSAGE("fclose on %s: %s\n",FD_ARR[N].log_filename,strerror(errno))
+                    error_fun(ERR_MESSAGE("fclose on %s: %s\n",LOG->log_filename,strerror(errno))
                             );
             }
-            FD_ARR[N].FD = NULL;
+            LOG->FD = NULL;
             
             
             }
@@ -942,9 +941,9 @@ int logCleaup(void (*error_fun)(char *fstring,...)){ //shuold be called ONLY fro
             //assert_msg(FD_ARR[N].FD == NULL, "Cleanup non closed FD");
             
             //free setvbuf allocation
-            if(FD_ARR[N].custom_io_buf){
-                free(FD_ARR[N].custom_io_buf);
-                FD_ARR[N].custom_io_buf=NULL;
+            if(LOG->custom_io_buf){
+                free(LOG->custom_io_buf);
+                LOG->custom_io_buf=NULL;
             }
             
             //основная очередь
@@ -972,9 +971,9 @@ int logCleaup(void (*error_fun)(char *fstring,...)){ //shuold be called ONLY fro
     
     //race!!! if logLog* run same time
     FD_LIST_ITEM_NUM=0;
-    if (FD_ARR) {
-        free(FD_ARR);
-        FD_ARR = NULL;
+    if (FD_LIST) {
+        free(FD_LIST);
+        FD_LIST = NULL;
     }
     
     
@@ -989,7 +988,7 @@ int logCleaup(void (*error_fun)(char *fstring,...)){ //shuold be called ONLY fro
 }
 
 
-int logOpen(int *logFile,log_attrs config, void (*error_fun)(char *fstring,...)){
+PlogLog_t logOpen(log_attrs config, void (*error_fun)(char *fstring,...)){
     
     
     //сделать мьютекс !!! чтобы не запустить LogOpen из двух мест сразу
@@ -1000,8 +999,7 @@ int logOpen(int *logFile,log_attrs config, void (*error_fun)(char *fstring,...))
     //static last_FD_LIST_ITEM_NUM=0;
     
     //повторно создавать лог файл неправильно!
-    assert(logFile != NULL);
-    assert_msg(*logFile == 0,"Attempt to re-open log?");
+    
     
     assert_msg(config.f_name_part1 !=NULL && strlen(config.f_name_part1)>0,"First part of file name MUST not be zero length");
 
@@ -1030,61 +1028,11 @@ int logOpen(int *logFile,log_attrs config, void (*error_fun)(char *fstring,...))
     
     //assert(mtx==0);
     
-    if(FD_LIST_ITEM_NUM == 0){
-
-        //FD_ARR=calloc(1,sizeof(struct FD_LIST_ITEM));
-        
-        FD_ARR=aligned_alloc(sizeof(uintptr_t), sizeof(struct FD_LIST_ITEM));
-        
-        assert_msg(FD_ARR != NULL,"FD_ARR aligned_alloc failed");
-
-
-        FD_LIST_ITEM_NUM=1;
-    }
-    else{
-        struct FD_LIST_ITEM *tmp=NULL;
-        errno=0;
-        //tmp=realloc(FD_ARR,(FD_LIST_ITEM_NUM+1)*sizeof(struct FD_LIST_ITEM));
-        
-        tmp=aligned_alloc(sizeof(uintptr_t), (FD_LIST_ITEM_NUM+1)*sizeof(struct FD_LIST_ITEM));
-        
-        assert_msg(tmp != NULL,"add FD_LIST_ITEM to FD_ARR aligned_alloc failed");
-        
-        
-        memcpy(tmp,FD_ARR,FD_LIST_ITEM_NUM*sizeof(struct FD_LIST_ITEM));
-        free(FD_ARR);
-
-        FD_ARR=tmp;
-        FD_LIST_ITEM_NUM+=1;
-        
-    }//realloc
+    struct FD_LIST_ITEM * LOG = aligned_alloc(sizeof(uintptr_t), sizeof(struct FD_LIST_ITEM));
+    assert_msg(LOG != NULL,"new LOG aligned_alloc failed");
     
     
-    
-    const int N=FD_LIST_ITEM_NUM-1;
-    memset(&(FD_ARR[N]),0,sizeof(struct FD_LIST_ITEM));
-    
-    
-    
-    
-    
-    /*{
-    
-    uint64_t c1,c2,diff;
-    RDTSCP(c1);
-    usleep(1000);
-    RDTSCP(c2);
-    
-    diff = (c2-c1)/1000UL;
-    
-    if(cycles_in_one_usec == 0 || diff<cycles_in_one_usec)
-
-            cycles_in_one_usec=diff;
-    }
-    */
-    
-    
-    
+    memset(LOG,0,sizeof(struct FD_LIST_ITEM));
     
     
     
@@ -1100,14 +1048,14 @@ int logOpen(int *logFile,log_attrs config, void (*error_fun)(char *fstring,...))
     
     memset(passive,0,sizeof (Q_element));
     
-    FD_ARR[N].QUEUE.head=passive;
-    FD_ARR[N].QUEUE.tail=passive;
+    LOG->QUEUE.head=passive;
+    LOG->QUEUE.tail=passive;
     
 #ifdef RETURN
         Q_element *passive2 = aligned_alloc(sizeof(uintptr_t), sizeof (Q_element));
         memset(passive2,0,sizeof (Q_element));
-        FD_ARR[N].QUEUE.return_head = passive2;
-        FD_ARR[N].QUEUE.return_tail=passive2;
+        LOG->QUEUE.return_head = passive2;
+        LOG->QUEUE.return_tail=passive2;
         
         
         for(int p=0;p<config.return_q;p++){
@@ -1115,8 +1063,8 @@ int logOpen(int *logFile,log_attrs config, void (*error_fun)(char *fstring,...))
              assert_msg(P != NULL, "Q_element aligned_alloc failed");
              memset(P,0,sizeof (Q_element));
              
-             FD_ARR[N].QUEUE.return_head->next = P;
-             FD_ARR[N].QUEUE.return_head = P;
+             LOG->QUEUE.return_head->next = P;
+             LOG->QUEUE.return_head = P;
         }
         
 #endif    
@@ -1124,14 +1072,11 @@ int logOpen(int *logFile,log_attrs config, void (*error_fun)(char *fstring,...))
     //int p = PTHREAD_PROCESS_SHARED;
     errno=0;
     assert_msg(
-            pthread_spin_init(&(FD_ARR[N].QUEUE.insert_lock),PTHREAD_PROCESS_SHARED) == 0 
+            pthread_spin_init(&(LOG->QUEUE.insert_lock),PTHREAD_PROCESS_SHARED) == 0 
             , "pthread_spin_init FAILed");
         
-    
-    
-    
-    FD_ARR[N].next=NULL; //LIKED LIST OF FDs NOT USED
-    FD_ARR[N].FD=NULL;
+    //? memset before?
+    LOG->FD=NULL;
     
     
     char log_filename_template[LOG_F_NAME_LEN]={0};
@@ -1287,10 +1232,10 @@ int logOpen(int *logFile,log_attrs config, void (*error_fun)(char *fstring,...))
     
     
     if(config.bufsize>0){
-        FD_ARR[N].custom_io_buf = aligned_alloc(sizeof(uintptr_t), config.bufsize);
-        assert_msg(FD_ARR[N].custom_io_buf != NULL, "custom_io_buf = aligned_alloc");
+        LOG->custom_io_buf = aligned_alloc(sizeof(uintptr_t), config.bufsize);
+        assert_msg(LOG->custom_io_buf != NULL, "custom_io_buf = aligned_alloc");
         errno=0;
-        if(setvbuf(t,FD_ARR[N].custom_io_buf,_IOFBF,config.bufsize) !=0){
+        if(setvbuf(t,LOG->custom_io_buf,_IOFBF,config.bufsize) !=0){
             if(error_fun)error_fun(
                 ERR_MESSAGE("setvbuf FAILed for '%s', err: %s\n",log_filename_template, strerror(errno))
             );
@@ -1303,32 +1248,49 @@ int logOpen(int *logFile,log_attrs config, void (*error_fun)(char *fstring,...))
     fprintf(t,"# File opened. time_source %i, timestamp_utc %i, bufsize %zi, return_q %i\n",config.time_source,config.timestamp_utc,config.bufsize,config.return_q);
         
    
-    FD_ARR[N].FD=t;
-    memcpy(FD_ARR[N].log_filename,log_filename_template,sizeof(log_filename_template));
+    LOG->FD=t;
     
-    *logFile=N+1;
+    //same len by macro LOG_F_NAME_LEN
+    memcpy(LOG->log_filename,log_filename_template,sizeof(log_filename_template));
     
-    //global!!! for all logs same tome source!!!!
-    time_source=config.time_source;
+    
+    //ts config
+    LOG->time_source=config.time_source;
+    LOG->timestamp_utc=config.timestamp_utc;
     
     //until logFlush starts
-    FD_ARR[N].insert_forbidden = 1;
+    LOG->insert_forbidden = 1;
+    
+    
+    //insert new log to end of list
+    if(FD_LIST == NULL){
+        FD_LIST=LOG;
+        FD_LIST_ITEM_NUM=1;
+    }
+    else{
+
+        FD_LIST->next=LOG;
+        FD_LIST_ITEM_NUM+=1;
+        
+    }//realloc
+    
+    
     
     //the only exit point!!!!
     
     pthread_mutex_unlock(&FD_ARR_mutex);
-    return 0;
+    return (uintptr_t)LOG;
 
 logOpen__exit:    
     pthread_mutex_unlock(&FD_ARR_mutex);
-    return -1;
+    return 0;
 }
 
 
-void logRedirect_stderr(int logFile, const char *funname, struct timespec time, const char* format, va_list ap){
+void logRedirect_stderr(PlogLog_t logFile, const char *funname, struct timespec time, const char* format, va_list ap){
     //lock
     char *eformat;
-    if(asprintf(&eformat,"%li.%09li\t%s(%i): %s\n", time.tv_sec + timezone_offset, time.tv_nsec, funname, logFile, format) <0  ){
+    if(asprintf(&eformat,"%li.%09li\t%s(%#lx): %s\n", time.tv_sec + timezone_offset, time.tv_nsec, funname, logFile, format) <0  ){
         return;
     }else{
         
@@ -1344,39 +1306,27 @@ void logRedirect_stderr(int logFile, const char *funname, struct timespec time, 
 /*
  * функция гадит в STDERR 
  */
-void logLogFixed(int logFile, size_t NUM, const char* format,  ...) { //вызывать как *file,(0|секунды),(0|микросекунды),"строка формата а-ля printf",переменный список аргументов
-   // FILE *logFile=NULL;
-  //  struct timespec logTime;
-//    char va_list_formated_buffer[VA_MACRO_LEN];
-    
+void logLogFixed(PlogLog_t logFile, size_t NUM, const char* format,  ...) { //вызывать как *file,(0|секунды),(0|микросекунды),"строка формата а-ля printf",переменный список аргументов
+
+    assert(logFile!=0);
     assert_msg(NUM<=PARAMS_FIXED_NUM, "NUM is limited! MAX: " __STRING(PARAMS_FIXED_NUM));
-    assert_msg(NUM>=0, "NUM valid range is 0.." __STRING(PARAMS_FIXED_NUM));
+    //size_t is unsigned!
+    //assert_msg(NUM>=0, "NUM valid range is 0.." __STRING(PARAMS_FIXED_NUM));
+    
+    struct FD_LIST_ITEM *LOG=(struct FD_LIST_ITEM *)logFile;
     
     va_list arglist;
     Q_element *ENTRY;
     struct timespec time={0};
     
     
-    if(time_source>=0)
-        clock_gettime(time_source,&time);
+    if(LOG->time_source>=0)
+        clock_gettime(LOG->time_source,&time);
+    
+    
     
 
-    int N=logFile-1;
-    
-    errno = 0;
-
-    if(
-            UNLIKELY(N < 0)
-            ||
-            UNLIKELY(logFile>FD_LIST_ITEM_NUM)
-            ||
-            UNLIKELY(FD_ARR == NULL)
-            ||
-            UNLIKELY(FD_ARR[N].FD == NULL)
-            ||
-            UNLIKELY(FD_ARR[N].insert_forbidden == 1)
-            
-            ){
+    if(UNLIKELY(LOG->insert_forbidden == 1)){
         
         va_start(arglist, format);
         logRedirect_stderr(logFile,__func__,time,format,arglist);
@@ -1388,7 +1338,7 @@ void logLogFixed(int logFile, size_t NUM, const char* format,  ...) { //вызы
     
     
     
-    LOG_QUEUE *Q = &(FD_ARR[N].QUEUE);
+    LOG_QUEUE *Q = &(LOG->QUEUE);
     
     
 #ifndef RETURN
@@ -1459,46 +1409,23 @@ void logLogFixed(int logFile, size_t NUM, const char* format,  ...) { //вызы
     
 }
 
-void logLogRelaxed(int logFile, const char* format,  ...) {
+void logLogRelaxed(PlogLog_t logFile, const char* format,  ...) {
     
 
+    assert(logFile!=0);
     
+    struct FD_LIST_ITEM *LOG=(struct FD_LIST_ITEM *)logFile;
     va_list arglist;
     Q_element *ENTRY;
     
         struct timespec time={0};
     
     
-    if(time_source>=0)
-        clock_gettime(time_source,&time);
+    if(LOG->time_source>=0)
+        clock_gettime(LOG->time_source,&time);
 
     
-    //ENTRY = calloc(1,sizeof(Q_element));
-    //ENTRY = aligned_alloc(sizeof(uintptr_t), sizeof (Q_element));
-    
-    //assert_msg(ENTRY != NULL);
-    //memset(ENTRY,0,sizeof (Q_element));
-    //сначала запоминаем время
-    errno = 0;
-    /*if(clock_gettime(CLOCK_ID_WALL,&(ENTRY->realtime))<0){
-        perror("logLog-clock_gettime(CLOCK_ID_WALL)");
-    }*/
-    int N=logFile-1;
-    
-    errno = 0;
-
-    if(
-            UNLIKELY(N < 0)
-            ||
-            UNLIKELY(logFile>FD_LIST_ITEM_NUM)
-            ||
-            UNLIKELY(FD_ARR == NULL)
-            ||
-            UNLIKELY(FD_ARR[N].FD == NULL)
-            ||
-            UNLIKELY(FD_ARR[N].insert_forbidden == 1)
-            
-            ){
+    if(UNLIKELY(LOG->insert_forbidden == 1)){
         
         va_start(arglist, format);
         logRedirect_stderr(logFile,__func__,time,format,arglist);
@@ -1509,7 +1436,7 @@ void logLogRelaxed(int logFile, const char* format,  ...) {
     
     
     
-    LOG_QUEUE *Q = &(FD_ARR[N].QUEUE);
+    LOG_QUEUE *Q = &(LOG->QUEUE);
     
 #ifndef RETURN
     ENTRY = aligned_alloc(sizeof(uintptr_t), sizeof (Q_element));
@@ -1678,44 +1605,23 @@ static void prepare_Q(){
     }
 }
 
-void logLogRelaxed_Q(int logFile, const char* format,  ...) {
+void logLogRelaxed_Q(PlogLog_t logFile, const char* format,  ...) {
     
+    assert(logFile!=0);
+    
+    struct FD_LIST_ITEM *LOG=(struct FD_LIST_ITEM *)logFile;
     va_list arglist;
     Q_element *ENTRY;
     
         struct timespec time={0};
     
     
-    if(time_source>=0)
-        clock_gettime(time_source,&time);
+    if(LOG->time_source>=0)
+        clock_gettime(LOG->time_source,&time);
 
     
-    //ENTRY = calloc(1,sizeof(Q_element));
-    //ENTRY = aligned_alloc(sizeof(uintptr_t), sizeof (Q_element));
-    
-    //assert_msg(ENTRY != NULL);
-    //memset(ENTRY,0,sizeof (Q_element));
-    //сначала запоминаем время
-    errno = 0;
-    /*if(clock_gettime(CLOCK_ID_WALL,&(ENTRY->realtime))<0){
-        perror("logLog-clock_gettime(CLOCK_ID_WALL)");
-    }*/
-    int N=logFile-1;
-    
-    errno = 0;
 
-    if(
-            UNLIKELY(N < 0)
-            ||
-            UNLIKELY(logFile>FD_LIST_ITEM_NUM)
-            ||
-            UNLIKELY(FD_ARR == NULL)
-            ||
-            UNLIKELY(FD_ARR[N].FD == NULL)
-            ||
-            UNLIKELY(FD_ARR[N].insert_forbidden == 1)
-            
-            ){
+    if(UNLIKELY(LOG->insert_forbidden == 1)){
         
         va_start(arglist, format);
         logRedirect_stderr(logFile,__func__,time,format,arglist);
@@ -1726,7 +1632,7 @@ void logLogRelaxed_Q(int logFile, const char* format,  ...) {
     
     
     
-    LOG_QUEUE *Q = &(FD_ARR[N].QUEUE);
+    LOG_QUEUE *Q = &(LOG->QUEUE);
     
 #ifndef RETURN
     ENTRY = aligned_alloc(sizeof(uintptr_t), sizeof (Q_element));
@@ -1846,9 +1752,11 @@ next:
 }
 
 
-void logLogRelaxed_wojt(int logFile, const char* format,  ...) {
+void logLogRelaxed_wojt(PlogLog_t logFile, const char* format,  ...) {
     
 
+    assert(logFile!=0);
+    struct FD_LIST_ITEM *LOG=(struct FD_LIST_ITEM *)logFile;
     
     va_list arglist;
     Q_element *ENTRY;
@@ -1856,36 +1764,12 @@ void logLogRelaxed_wojt(int logFile, const char* format,  ...) {
         struct timespec time={0};
     
     
-    if(time_source>=0)
-        clock_gettime(time_source,&time);
+    if(LOG->time_source>=0)
+        clock_gettime(LOG->time_source,&time);
 
     
-    //ENTRY = calloc(1,sizeof(Q_element));
-    //ENTRY = aligned_alloc(sizeof(uintptr_t), sizeof (Q_element));
-    
-    //assert_msg(ENTRY != NULL);
-    //memset(ENTRY,0,sizeof (Q_element));
-    //сначала запоминаем время
-    errno = 0;
-    /*if(clock_gettime(CLOCK_ID_WALL,&(ENTRY->realtime))<0){
-        perror("logLog-clock_gettime(CLOCK_ID_WALL)");
-    }*/
-    int N=logFile-1;
-    
-    errno = 0;
 
-    if(
-            UNLIKELY(N < 0)
-            ||
-            UNLIKELY(logFile>FD_LIST_ITEM_NUM)
-            ||
-            UNLIKELY(FD_ARR == NULL)
-            ||
-            UNLIKELY(FD_ARR[N].FD == NULL)
-            ||
-            UNLIKELY(FD_ARR[N].insert_forbidden == 1)
-            
-            ){
+    if(UNLIKELY(LOG->insert_forbidden == 1)){
         
         va_start(arglist, format);
         logRedirect_stderr(logFile,__func__,time,format,arglist);
@@ -1896,7 +1780,7 @@ void logLogRelaxed_wojt(int logFile, const char* format,  ...) {
     
     
     
-    LOG_QUEUE *Q = &(FD_ARR[N].QUEUE);
+    LOG_QUEUE *Q = &(LOG->QUEUE);
     
 #ifndef RETURN
     ENTRY = aligned_alloc(sizeof(uintptr_t), sizeof (Q_element));
@@ -2015,19 +1899,21 @@ next:
 }
 
 
-void logLogRelaxedDummy(int logFile, const char* format,  ...) { 
+void logLogRelaxedDummy(PlogLog_t logFile, const char* format,  ...) { 
     
 
+
+    assert(logFile!=0);
+    
+    struct FD_LIST_ITEM *LOG=(struct FD_LIST_ITEM *)logFile;
     
     va_list arglist;
     Q_element ENTRY;
     
     struct timespec time={0};
     
-    if(time_source>=0)
-        clock_gettime(time_source,&time);
-    
-    //int N=logFile-1;
+    if(LOG->time_source>=0)
+        clock_gettime(LOG->time_source,&time);
     
     
     va_start(arglist, format); //LAST PARAM!!!
@@ -2098,19 +1984,18 @@ next:
 #define NOT_IN_JUMP_RANGE(Ch) ((Ch) < '%' || (Ch) > 'x')
 #define CHAR_CLASS(Ch) (jump_table[(int) (Ch) - '%'])
 
-void logLogRelaxedDummy_wojt(int logFile, const char* format,  ...) { 
+void logLogRelaxedDummy_wojt(PlogLog_t logFile, const char* format,  ...) { 
     
 
-    
+    assert(logFile!=0);
+    struct FD_LIST_ITEM *LOG=(struct FD_LIST_ITEM *)logFile;
     va_list arglist;
     Q_element ENTRY;
     
     struct timespec time={0};
     
-    if(time_source>=0)
-        clock_gettime(time_source,&time);
-    
-    //int N=logFile-1;
+    if(LOG->time_source>=0)
+        clock_gettime(LOG->time_source,&time);
     
     
     va_start(arglist, format); //LAST PARAM!!!
@@ -2231,7 +2116,11 @@ void logLogFullObjFree(logObj **Obj){
     return;
 }
 
-void logLogFull(int logFile, logObj *obj, const char* format,  ...) {
+void logLogFull(PlogLog_t logFile, logObj *obj, const char* format,  ...) {
+    
+    assert(logFile!=0);
+    struct FD_LIST_ITEM *LOG=(struct FD_LIST_ITEM *)logFile;
+    
     Q_element *ENTRY;
     LOG_QUEUE *Q;
     
@@ -2241,31 +2130,11 @@ void logLogFull(int logFile, logObj *obj, const char* format,  ...) {
         struct timespec time={0};
     
     
-    if(time_source>=0)
-        clock_gettime(time_source,&time);
+    if(LOG->time_source>=0)
+        clock_gettime(LOG->time_source,&time);
 
 
-    //сначала запоминаем время
-    //errno = 0;
-    /*if(clock_gettime(CLOCK_ID_WALL,&(ENTRY->realtime))<0){
-        perror("logLog-clock_gettime(CLOCK_ID_WALL)");
-    }*/
-    int N=logFile-1;
-    
-    errno = 0;
-
-    if(
-            UNLIKELY(N < 0)
-            ||
-            UNLIKELY(logFile>FD_LIST_ITEM_NUM)
-            ||
-            UNLIKELY(FD_ARR == NULL)
-            ||
-            UNLIKELY(FD_ARR[N].FD == NULL)
-            ||
-            UNLIKELY(FD_ARR[N].insert_forbidden == 1)
-            
-            ){
+    if(UNLIKELY(LOG->insert_forbidden == 1)){
         
         va_start(arglist, format);
         logRedirect_stderr(logFile,__func__,time,format,arglist);
@@ -2281,7 +2150,7 @@ void logLogFull(int logFile, logObj *obj, const char* format,  ...) {
         obj->n = logLogFullObjBufLen;
         //fprintf(stderr,"temp_format alloc\n");
     }
-    Q = &(FD_ARR[N].QUEUE);
+    Q = &(LOG->QUEUE);
 
     
 #ifndef RETURN
