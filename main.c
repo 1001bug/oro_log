@@ -152,8 +152,8 @@ int main(int argc, char** argv) {
 
 
     char *static_string_ptr = ">static_string_ptr<";
-    int LOG = 0;
-    int LOG2= 0;
+    PlogLog_t LOG = 0;
+    PlogLog_t LOG2= 0;
     
     log_attrs config={0};
     config.f_name_part1="out";
@@ -172,12 +172,12 @@ int main(int argc, char** argv) {
     //config.time_source=-1;
     config.timestamp_utc = 1;
     
-    int r = logOpen(&LOG,config,on_error_stderr);
+    LOG = logOpen(config,on_error_stderr);
     
     
     //int r = logOpen(&LOG, 0, "", "main", "A", on_error_stderr);
     //int some = 33;
-    assert(r == 0);
+
     assert(LOG != 0);
     
     config.f_name_part1="out_2";
@@ -192,10 +192,10 @@ int main(int argc, char** argv) {
 
 
     
-    r = logOpen(&LOG2,config,on_error_stderr);
+    LOG2 = logOpen(config,on_error_stderr);
     
-    assert(r == 0);
-    assert(LOG2 != 0);
+    assert(LOG2);
+    
     
     
     //logFlush('R', 0, "2", on_error_stderr);
