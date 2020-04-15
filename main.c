@@ -168,8 +168,8 @@ int main(int argc, char** argv) {
     config.file_name_with_pid=0;
     //config.path="some";
     
-    config.time_source=CLOCK_ID_MEASURE;
-    //config.time_source=-1;
+    //config.time_source=CLOCK_ID_MEASURE;
+    config.time_source=-1;
     config.timestamp_utc = 1;
     
     LOG = oroLogOpen(config,on_error_stderr);

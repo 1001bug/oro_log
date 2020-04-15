@@ -93,6 +93,8 @@ extern const char *__progname;
 //variadic param length
 #define PARAMS_FIXED_NUM 16
 
+#define SPINLOCK
+
 //return queue from logFlush to logLog and def size
 #define RETURN
 #define RETURN_QUANTITY 2000
@@ -106,7 +108,7 @@ static long timezone_offset;
 static struct timespec logOpenTime;
 //static volatile int endlessCycle = 1;
 static const size_t logLogFullObjBufLen = 2048;
-//static int time_source = CLOCK_ID_WALL_FAST; //global. same for all logs
+static int time_source = CLOCK_ID_WALL_FAST; //global. same for all logs
 
 //not need any more
 static unsigned long logQueueSize(Poro_t logFile, void (*error_fun)(char *fstring,...));
@@ -201,8 +203,9 @@ struct FD_LIST_ITEM{
     FILE *FD;
     LOG_QUEUE QUEUE  __attribute__ ((aligned(sizeof(uintptr_t))));;
     char *custom_io_buf;
-    clockid_t time_source; //usualy no reason to use different time source
-    int timestamp_utc;     //utc is for mononic time source
+    //expensive to access this field (pref)
+    //clockid_t time_source; //usualy no reason to use different time source
+    //int timestamp_utc;     //utc is for mononic time source
     struct FD_LIST_ITEM *next;
     
     volatile int insert_forbidden __attribute__ ((aligned(sizeof(uintptr_t))));
@@ -359,7 +362,8 @@ static void * logWrite_thread(void *e_fun){
                     
                     prev_sec = E->realtime.tv_sec;
                             
-                    sec = (prev_sec + (LOG->timestamp_utc?0:timezone_offset) ) % 86400; //секунд в последних судках. 24*60*60=86400
+                    //sec = (prev_sec + (LOG->timestamp_utc?0:timezone_offset) ) % 86400; //секунд в последних судках. 24*60*60=86400
+                    sec = (prev_sec + timezone_offset ) % 86400; //секунд в последних судках. 24*60*60=86400
                     
                     min = sec / 60;
                     
@@ -404,7 +408,7 @@ static void * logWrite_thread(void *e_fun){
 
                 //fputs_unlocked(DATE_FORMAT_STRING,F);
                 //вписать наносекунды
-                if (LOG->time_source >= 0)
+                if (time_source >= 0)
                     fprintf(F, DATE_FORMAT_STRING, E->realtime.tv_nsec);
 
 
@@ -1129,8 +1133,12 @@ Poro_t oroLogOpen(oro_attrs_t config, void (*error_fun)(char *fstring,...)){
     
     
     //ts config
-    LOG->time_source=config.time_source;
-    LOG->timestamp_utc=config.timestamp_utc;
+    //LOG->time_source=config.time_source;
+    //LOG->timestamp_utc=config.timestamp_utc;
+    
+    //expensive (by perf)
+    time_source=config.time_source;
+    
     
     //until logFlush starts
     LOG->insert_forbidden = 1;
@@ -1196,8 +1204,8 @@ void oroLogFixed(Poro_t logFile, size_t NUM, const char* format,  ...){
     struct timespec time={0};
     
     
-    if(LOG->time_source>=0)
-        clock_gettime(LOG->time_source,&time);
+    if(time_source>=0)
+        clock_gettime(time_source,&time);
     
     
     
@@ -1222,7 +1230,9 @@ void oroLogFixed(Poro_t logFile, size_t NUM, const char* format,  ...){
 #else
     
 //несколько тредов будут разбирать список, нужна блокировка. это конечно неахти
+#ifdef SPINLOCK 
     pthread_spin_lock(&(Q->insert_lock));
+#endif    
     
     //есть а наличии следующий эллемент? берем текущий, а слежующий помечем хвостом
     if(LIKELY(Q->return_tail->next != NULL)){
@@ -1235,7 +1245,10 @@ void oroLogFixed(Poro_t logFile, size_t NUM, const char* format,  ...){
 #endif        
     }
     
+#ifdef SPINLOCK
     pthread_spin_unlock(&(Q->insert_lock));
+#endif
+   
     
 #endif    
     
@@ -1266,9 +1279,10 @@ void oroLogFixed(Poro_t logFile, size_t NUM, const char* format,  ...){
 
     ENTRY->realtime = time;
     
+#ifdef SPINLOCK 
     //очередь одна, вставка многими - нужна блокировка
     pthread_spin_lock(&(Q->insert_lock));
-    
+#endif    
     
     Q->head->next=ENTRY;
     Q->head=ENTRY;
@@ -1280,7 +1294,9 @@ void oroLogFixed(Poro_t logFile, size_t NUM, const char* format,  ...){
     
     /*next!*/
     
+#ifdef SPINLOCK 
     pthread_spin_unlock(&(Q->insert_lock));
+#endif    
     
     
 }
@@ -1302,8 +1318,8 @@ void oroLogRelaxed(Poro_t logFile, const char* format,  ...) {
         struct timespec time={0};
     
     
-    if(LOG->time_source>=0)
-        clock_gettime(LOG->time_source,&time);
+    if(time_source>=0)
+        clock_gettime(time_source,&time);
 
     
     if(UNLIKELY(LOG->insert_forbidden == 1)){
@@ -1324,7 +1340,9 @@ void oroLogRelaxed(Poro_t logFile, const char* format,  ...) {
 #else
     
 //несколько тредов будут разбирать список, нужна блокировка. это конечно неахти
+#ifdef SPINLOCK 
     pthread_spin_lock(&(Q->insert_lock));
+#endif    
     
     //есть а наличии следующий эллемент? берем текущий, а слежующий помечем хвостом
     if(Q->return_tail->next){
@@ -1336,8 +1354,9 @@ void oroLogRelaxed(Poro_t logFile, const char* format,  ...) {
         fprintf(stderr,"RETURN Q EMPTY\n");
 #endif        
     }
-    
+#ifdef SPINLOCK     
     pthread_spin_unlock(&(Q->insert_lock));
+#endif    
     
 #endif        
     
@@ -1416,13 +1435,17 @@ exit_parsing:
     ENTRY->realtime = time;
     
     
+#ifdef SPINLOCK 
     pthread_spin_lock(&(Q->insert_lock));
+#endif    
     
     Q->head->next=ENTRY;
     Q->head=ENTRY;
     Q->cnt_in+=1;
 
+#ifdef SPINLOCK 
     pthread_spin_unlock(&(Q->insert_lock));
+#endif    
 
     
 }
@@ -1512,8 +1535,8 @@ void oroLogRelaxed_Q(Poro_t logFile, const char* format,  ...) {
         struct timespec time={0};
     
     
-    if(LOG->time_source>=0)
-        clock_gettime(LOG->time_source,&time);
+    if(time_source>=0)
+        clock_gettime(time_source,&time);
 
     
 
@@ -1535,7 +1558,9 @@ void oroLogRelaxed_Q(Poro_t logFile, const char* format,  ...) {
 #else
     
 //несколько тредов будут разбирать список, нужна блокировка. это конечно неахти
+#ifdef SPINLOCK 
     pthread_spin_lock(&(Q->insert_lock));
+#endif    
     
     //есть а наличии следующий эллемент? берем текущий, а слежующий помечем хвостом
     if(Q->return_tail->next){
@@ -1548,7 +1573,9 @@ void oroLogRelaxed_Q(Poro_t logFile, const char* format,  ...) {
 #endif        
     }
     
+#ifdef SPINLOCK 
     pthread_spin_unlock(&(Q->insert_lock));
+#endif    
     
 #endif        
     
@@ -1640,13 +1667,17 @@ exit_parsing:
     ENTRY->realtime = time;
     
     
+#ifdef SPINLOCK 
     pthread_spin_lock(&(Q->insert_lock));
+#endif   
     
     Q->head->next=ENTRY;
     Q->head=ENTRY;
     Q->cnt_in+=1;
 
+#ifdef SPINLOCK     
     pthread_spin_unlock(&(Q->insert_lock));
+#endif    
 
     
 }
@@ -1669,8 +1700,8 @@ void oroLogRelaxed_wojt(Poro_t logFile, const char* format,  ...) {
         struct timespec time={0};
     
     
-    if(LOG->time_source>=0)
-        clock_gettime(LOG->time_source,&time);
+    if(time_source>=0)
+        clock_gettime(time_source,&time);
 
     
 
@@ -1692,7 +1723,9 @@ void oroLogRelaxed_wojt(Poro_t logFile, const char* format,  ...) {
 #else
     
 //несколько тредов будут разбирать список, нужна блокировка. это конечно неахти
+#ifdef SPINLOCK 
     pthread_spin_lock(&(Q->insert_lock));
+#endif    
     
     //есть а наличии следующий эллемент? берем текущий, а слежующий помечем хвостом
     if(Q->return_tail->next){
@@ -1705,7 +1738,9 @@ void oroLogRelaxed_wojt(Poro_t logFile, const char* format,  ...) {
 #endif        
     }
     
+#ifdef SPINLOCK 
     pthread_spin_unlock(&(Q->insert_lock));
+#endif    
     
 #endif        
     
@@ -1792,13 +1827,17 @@ next:
     ENTRY->realtime = time;
     
     
+#ifdef SPINLOCK 
     pthread_spin_lock(&(Q->insert_lock));
+#endif    
     
     Q->head->next=ENTRY;
     Q->head=ENTRY;
     Q->cnt_in+=1;
 
+#ifdef SPINLOCK 
     pthread_spin_unlock(&(Q->insert_lock));
+#endif    
 
     
 }
@@ -1815,15 +1854,15 @@ void oroLogRelaxedDummy(Poro_t logFile, const char* format,  ...) {
 
     assert(logFile!=0);
     
-    struct FD_LIST_ITEM *LOG=(struct FD_LIST_ITEM *)logFile;
+//    struct FD_LIST_ITEM *LOG=(struct FD_LIST_ITEM *)logFile;
     
     va_list arglist;
     Q_element ENTRY;
     
     struct timespec time={0};
     
-    if(LOG->time_source>=0)
-        clock_gettime(LOG->time_source,&time);
+    if(time_source>=0)
+        clock_gettime(time_source,&time);
     
     
     va_start(arglist, format); //LAST PARAM!!!
@@ -1901,14 +1940,14 @@ void oroLogRelaxedDummy_wojt(Poro_t logFile, const char* format,  ...) {
     
 
     assert(logFile!=0);
-    struct FD_LIST_ITEM *LOG=(struct FD_LIST_ITEM *)logFile;
+//    struct FD_LIST_ITEM *LOG=(struct FD_LIST_ITEM *)logFile;
     va_list arglist;
     Q_element ENTRY;
     
     struct timespec time={0};
     
-    if(LOG->time_source>=0)
-        clock_gettime(LOG->time_source,&time);
+    if(time_source>=0)
+        clock_gettime(time_source,&time);
     
     
     va_start(arglist, format); //LAST PARAM!!!
@@ -2041,8 +2080,8 @@ void oroLogFull(Poro_t logFile, oroObj_t *obj, const char* format,  ...) {
         struct timespec time={0};
     
     
-    if(LOG->time_source>=0)
-        clock_gettime(LOG->time_source,&time);
+    if(time_source>=0)
+        clock_gettime(time_source,&time);
 
 
     if(UNLIKELY(LOG->insert_forbidden == 1)){
@@ -2069,7 +2108,9 @@ void oroLogFull(Poro_t logFile, oroObj_t *obj, const char* format,  ...) {
 #else
     
 //несколько тредов будут разбирать список, нужна блокировка. это конечно неахти
+#ifdef SPINLOCK 
     pthread_spin_lock(&(Q->insert_lock));
+#endif    
     
     //есть а наличии следующий эллемент? берем текущий, а слежующий помечем хвостом
     if(Q->return_tail->next){
@@ -2082,7 +2123,9 @@ void oroLogFull(Poro_t logFile, oroObj_t *obj, const char* format,  ...) {
 #endif        
     }
     
+#ifdef SPINLOCK 
     pthread_spin_unlock(&(Q->insert_lock));
+#endif    
     
 #endif        
     
@@ -2134,13 +2177,17 @@ void oroLogFull(Poro_t logFile, oroObj_t *obj, const char* format,  ...) {
     //if(1)
     //    ENTRY->tid = pthread_self();
     
+#ifdef SPINLOCK 
     pthread_spin_lock(&(Q->insert_lock));
+#endif    
     
     Q->head->next=ENTRY;
     Q->head=ENTRY;
     Q->cnt_in+=1;
 
+#ifdef SPINLOCK 
     pthread_spin_unlock(&(Q->insert_lock));
+#endif    
 
     
 }
@@ -2167,8 +2214,8 @@ size_t oroLogFulla(Poro_t logFile, size_t expecting_byte, const char* format,  .
         struct timespec time={0};
     
     
-    if(LOG->time_source>=0)
-        clock_gettime(LOG->time_source,&time);
+    if(time_source>=0)
+        clock_gettime(time_source,&time);
 
 
     if(UNLIKELY(LOG->insert_forbidden == 1)){
@@ -2189,7 +2236,9 @@ size_t oroLogFulla(Poro_t logFile, size_t expecting_byte, const char* format,  .
 #else
     
 //несколько тредов будут разбирать список, нужна блокировка. это конечно неахти
+#ifdef SPINLOCK 
     pthread_spin_lock(&(Q->insert_lock));
+#endif    
     
     //есть а наличии следующий эллемент? берем текущий, а слежующий помечем хвостом
     if(Q->return_tail->next){
@@ -2201,8 +2250,9 @@ size_t oroLogFulla(Poro_t logFile, size_t expecting_byte, const char* format,  .
         fprintf(stderr,"RETURN Q EMPTY\n");
 #endif        
     }
-    
-    pthread_spin_unlock(&(Q->insert_lock));
+#ifdef SPINLOCK     
+     pthread_spin_unlock(&(Q->insert_lock));
+#endif     
     
 #endif        
     
@@ -2245,13 +2295,17 @@ size_t oroLogFulla(Poro_t logFile, size_t expecting_byte, const char* format,  .
     //if(1)
     //    ENTRY->tid = pthread_self();
     
+#ifdef SPINLOCK 
     pthread_spin_lock(&(Q->insert_lock));
+#endif    
     
     Q->head->next=ENTRY;
     Q->head=ENTRY;
     Q->cnt_in+=1;
 
+#ifdef SPINLOCK 
     pthread_spin_unlock(&(Q->insert_lock));
+#endif    
 
     return expecting_byte;
 }
