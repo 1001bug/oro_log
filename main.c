@@ -303,7 +303,9 @@ int main(int argc, char** argv) {
     //(tmp * 1000L) / cycles_in_one_usec
     
     
-    
+    oroLogFixedA(LOG, "logLogFixed WRONG   entry str='%s' %u with TIME=%li%09li anf current sec number %l ................... " ,">str<",1,2,3,4);
+    oroLogRelaxed(LOG, "oroLogRelaxed WRONG  entry str='%s' %u with TIME=%li%09li anf current sec number %l................. " ,">str<",1,2,3,4);
+    oroLogRelaxed_Q(LOG, "oroLogRelaxed WRONG  entry str='%s' %u with TIME=%li%09li anf current sec number %l ................ " ,">str<",1,2,3,4);
     
     
     

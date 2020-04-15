@@ -116,7 +116,7 @@ static unsigned long logQueueSize(Poro_t logFile, void (*error_fun)(char *fstrin
 
 static const uint8_t stop_tb[128] __attribute__ ((aligned(sizeof(uintptr_t)))) =
   {
-    0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+    4,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
     0,0,0,0,0,0,0,0,0,0,0,0,0,
                   /* '%' */  3,            0, /* '\''*/  0,
 	       0,            0, /* '*' */  0, /* '+' */  0,
@@ -1354,11 +1354,11 @@ void oroLogRelaxed(Poro_t logFile, const char* format,  ...) {
 
     const char *string = format;
     int num = 0;
-    while (*string != '\0'){
-    if (*string == '%'){
+    while (   (string = strchr(string,'%'))!= NULL ){
+    
         
         ++string;
-        while(*string != '\0'){
+        for(;;){
             switch (UNLIKELY(*string > 'x') ? 0 : stop_tb[(int)*string]) {
                     case 0://any
                     {
@@ -1383,6 +1383,12 @@ void oroLogRelaxed(Poro_t logFile, const char* format,  ...) {
                     {
                         goto next;
                     }
+                    case 4: //'\0'
+                    {
+                        format="(bad format)";
+                        goto exit_parsing;
+                        
+                    }
                     default:
                     {
                         ++string;
@@ -1391,13 +1397,14 @@ void oroLogRelaxed(Poro_t logFile, const char* format,  ...) {
                 }
             
         }//search for end
+        
 
-    }//start of format
+
 next:    
     ++string;
   }//outer while
     
-    
+exit_parsing:    
 
     va_end(arglist);
     
@@ -1558,15 +1565,14 @@ void oroLogRelaxed_Q(Poro_t logFile, const char* format,  ...) {
 
     const char *string = format;
     int num = 0;
-    while (*string != '\0'){
-    if (*string == '%'){
-        
+    while (   (string = strchr(string,'%'))!= NULL ){
+    //if (*string == '%')
+    
+        //след. симв. после начала формата и дпока не найдем конец формата
         ++string;
         while(*string != '\0'){
             uint8_t v=0;
             char c=*string;
-                //if (LIKELY(c < '{' && c > ' ')) {
-                //if (LIKELY(c < '{')) 
                     
 
                     uint8_t pos = c / 4;
@@ -1611,12 +1617,17 @@ void oroLogRelaxed_Q(Poro_t logFile, const char* format,  ...) {
                 }
             
         }//search for end
-
-    }//start of format
+        if(*string == '\0'){
+            format="(bad format)";
+            goto exit_parsing;
+        }
+    
 next:    
+    //конец формата найден. перешагнуть его
     ++string;
   }//outer while
     
+exit_parsing: 
     
 
     va_end(arglist);
