@@ -51,7 +51,9 @@
    ? __ASSERT_VOID_CAST (0)      \
    : __assert_fail (__STRING(msg) ": "    __STRING(expr), __FILE__, __LINE__, __ASSERT_FUNCTION))
 
- #define RDTSCP(V) __asm__ __volatile__("rdtscp;shl $32, %%rdx;or %%rdx, %%rax":"=a"(V):: "%rcx", "%rdx")
+#define MFENCE    __asm__ __volatile__ ("mfence" ::: "memory") 
+#define LFENCE    __asm__ __volatile__ ("lfence" ::: "memory") 
+#define RDTSCP(V) __asm__ __volatile__("rdtscp;shl $32, %%rdx;or %%rdx, %%rax":"=a"(V):: "%rcx", "%rdx")
 
  
 

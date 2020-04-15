@@ -37,12 +37,18 @@
 
 #define LOG_HEADER ""
 //#define LOG_HEADER "%02i:%02i:%02i.%09li|%li%09li;"
-#define NN 1000
+#define NN 1000000
 /*
  * 
  */
+#define MFENCE    __asm__ __volatile__ ("mfence" ::: "memory") 
+#define LFENCE    __asm__ __volatile__ ("lfence" ::: "memory") 
+#define _RDTSCP(V) __asm__ __volatile__("rdtscp;shl $32, %%rdx;or %%rdx, %%rax":"=a"(V):: "%rcx", "%rdx")
+#define RDTSCP(V) MFENCE;\
+_RDTSCP(V);\
+MFENCE
 
-#define RDTSCP(V) __asm__ __volatile__("rdtscp;shl $32, %%rdx;or %%rdx, %%rax":"=a"(V):: "%rcx", "%rdx")
+
 extern const char *__progname; //иммя программы без прибамбасов
 void PRINT_STAT(const char *name, uint64_t *time_S, uint64_t *time_E, uint64_t *time_Dif, int cnt);
 
@@ -171,6 +177,8 @@ int main(int argc, char** argv) {
     //config.time_source=CLOCK_ID_MEASURE;
     config.time_source=-1;
     config.timestamp_utc = 1;
+    
+    config.return_q=NN;
     
     LOG = oroLogOpen(config,on_error_stderr);
     
