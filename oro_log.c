@@ -13,7 +13,9 @@
  * добавление логов после старта oroWriter
  * _unlocked versions
  * remove oroObj anf oroLogFull, use oroLogFulla instead
- * 
+ * remove errno on critical path
+ * remove memset where not realy needed
+ * mlock and populate all Qs
  */
 
 
@@ -36,6 +38,7 @@
 
 #include <bits/stdio_lim.h>
 #include <fcntl.h>
+#include <sys/mman.h>
 
 
 #ifndef NOOPTY
@@ -51,8 +54,19 @@
    ? __ASSERT_VOID_CAST (0)      \
    : __assert_fail (__STRING(msg) ": "    __STRING(expr), __FILE__, __LINE__, __ASSERT_FUNCTION))
 
-#define MFENCE    __asm__ __volatile__ ("mfence" ::: "memory") 
-#define LFENCE    __asm__ __volatile__ ("lfence" ::: "memory") 
+//fence is OFF - good luck
+#define Q_NEXT_FENCE
+
+// + 2 nano
+//#define Q_NEXT_FENCE    __asm__ __volatile__ ("sfence" ::: "memory");
+
+//+15 nano both the same
+//#define Q_NEXT_FENCE    __sync_synchronize();
+//#define Q_NEXT_FENCE    __asm__ __volatile__ ("mfence" ::: "memory");
+
+#define MFENCE    __asm__ __volatile__ ("mfence" ::: "memory")
+#define LFENCE    __asm__ __volatile__ ("lfence" ::: "memory")
+#define SFENCE    __asm__ __volatile__ ("sfence" ::: "memory")
 #define RDTSCP(V) __asm__ __volatile__("rdtscp;shl $32, %%rdx;or %%rdx, %%rax":"=a"(V):: "%rcx", "%rdx")
 
  
@@ -95,7 +109,7 @@ extern const char *__progname;
 //variadic param length
 #define PARAMS_FIXED_NUM 16
 
-#define SPINLOCK
+#define NOSPINLOCK
 
 //return queue from logFlush to logLog and def size
 #define RETURN
@@ -158,6 +172,7 @@ static void logRedirect_stderr(Poro_t logFile, const char *funname, struct times
 static int str_s_cpy(char *dest, const char *src, size_t sizeof_dest);
 static void prepare_Q();
 //size_t const cache_line_size = 64; sysconf(_SC_LEVEL3_CACHE_LINESIZE)
+static void *x_aligned_zeroed_locked_alloc (size_t __size);
 
 static volatile int requestForLogsTruncate = 0;
 
@@ -239,7 +254,24 @@ void oroLogTruncate(){
     return;
 }
 
-
+static void *x_aligned_zeroed_locked_alloc (size_t __size){
+    size_t new_size = (((__size - 1) / sizeof(uintptr_t)) + 1) * sizeof(uintptr_t);
+            
+    void * P = aligned_alloc(sizeof(uintptr_t), new_size);
+    
+    if(P==NULL)
+        return NULL;
+    memset(P,0,new_size);
+    errno=0;
+    if(mlock(P,new_size)!=0){
+        perror("mlock in x_aligned_zeroed_locked_alloc");
+        free(P);
+        P=NULL;
+    }
+    return P;
+    
+    
+}
 static void * logWrite_thread(void *e_fun){
     //__suseconds_t usec_sleep = *(__suseconds_t *) S;
     __suseconds_t usec_sleep = logFlush_empty_queue_sleep ; //GLOBAL
@@ -908,11 +940,11 @@ Poro_t oroLogOpen(oro_attrs_t config, void (*error_fun)(char *fstring,...)){
     
     //assert(mtx==0);
     
-    struct FD_LIST_ITEM * LOG = aligned_alloc(sizeof(uintptr_t), sizeof(struct FD_LIST_ITEM));
+    struct FD_LIST_ITEM * LOG = x_aligned_zeroed_locked_alloc(sizeof(struct FD_LIST_ITEM));
     assert_msg(LOG != NULL,"new LOG aligned_alloc failed");
     
     
-    memset(LOG,0,sizeof(struct FD_LIST_ITEM));
+    //memset(LOG,0,sizeof(struct FD_LIST_ITEM));
     
     
     
@@ -922,26 +954,26 @@ Poro_t oroLogOpen(oro_attrs_t config, void (*error_fun)(char *fstring,...)){
     errno = 0;
     
     //Q_element *passive = calloc(1, sizeof (Q_element));
-    Q_element *passive = aligned_alloc(sizeof(uintptr_t), sizeof (Q_element));
+    Q_element *passive = x_aligned_zeroed_locked_alloc(sizeof (Q_element));
     assert_msg(passive != NULL, "Q_element *passive = aligned_alloc");
         
     
-    memset(passive,0,sizeof (Q_element));
+    //memset(passive,0,sizeof (Q_element));
     
     LOG->QUEUE.head=passive;
     LOG->QUEUE.tail=passive;
     
 #ifdef RETURN
-        Q_element *passive2 = aligned_alloc(sizeof(uintptr_t), sizeof (Q_element));
-        memset(passive2,0,sizeof (Q_element));
+        Q_element *passive2 = x_aligned_zeroed_locked_alloc(sizeof (Q_element));
+        //memset(passive2,0,sizeof (Q_element));
         LOG->QUEUE.return_head = passive2;
         LOG->QUEUE.return_tail=passive2;
         
         
         for(int p=0;p<config.return_q;p++){
-             Q_element *P = aligned_alloc(sizeof(uintptr_t), sizeof (Q_element));
+             Q_element *P = x_aligned_zeroed_locked_alloc(sizeof (Q_element));
              assert_msg(P != NULL, "Q_element aligned_alloc failed");
-             memset(P,0,sizeof (Q_element));
+             //memset(P,0,sizeof (Q_element));
              
              LOG->QUEUE.return_head->next = P;
              LOG->QUEUE.return_head = P;
@@ -1112,7 +1144,7 @@ Poro_t oroLogOpen(oro_attrs_t config, void (*error_fun)(char *fstring,...)){
     
     
     if(config.bufsize>0){
-        LOG->custom_io_buf = aligned_alloc(sizeof(uintptr_t), config.bufsize);
+        LOG->custom_io_buf = x_aligned_zeroed_locked_alloc(config.bufsize);
         assert_msg(LOG->custom_io_buf != NULL, "custom_io_buf = aligned_alloc");
         errno=0;
         if(setvbuf(t,LOG->custom_io_buf,_IOFBF,config.bufsize) !=0){
@@ -1257,11 +1289,12 @@ void oroLogFixed(Poro_t logFile, size_t NUM, const char* format,  ...){
     
  
     
-    
+    //MFENCE;
+    //MFENCE_LITE;
     
     //неважно какой истоник элемента - обнулить!
     assert_msg(ENTRY != NULL,"Got non valid Queue element pointer");
-    memset(ENTRY,0,sizeof (Q_element));
+    //memset(ENTRY,0,sizeof (Q_element));
     
     
     
@@ -1269,7 +1302,7 @@ void oroLogFixed(Poro_t logFile, size_t NUM, const char* format,  ...){
 
     va_start(arglist, format); //LAST PARAM!!!
     
-    
+    //switch???
     //боюсь что забирая значения по ширине машинного слова, могу забрать сразу два
     for(int num = 0 ; num <NUM ; num++) {
         p[num] = va_arg(arglist,uintptr_t);
@@ -1278,23 +1311,29 @@ void oroLogFixed(Poro_t logFile, size_t NUM, const char* format,  ...){
     
     ENTRY->format_string = format;
     ENTRY->num = NUM;
+    ENTRY->params_free_mask=(uintptr_t)0;
 
     ENTRY->realtime = time;
+    ENTRY->next=NULL;
     
 #ifdef SPINLOCK 
     //очередь одна, вставка многими - нужна блокировка
     pthread_spin_lock(&(Q->insert_lock));
 #endif    
     
-    Q->head->next=ENTRY;
-    Q->head=ENTRY;
-    Q->cnt_in+=1;
+    Q_NEXT_FENCE;
+    
+    //MFENCE;
     
     //мем фенс!!!
     //__sync_synchronize;
     //__asm__ __volatile__("":::"memory");
     
     /*next!*/
+    Q->head->next=ENTRY;
+    Q->head=ENTRY;
+    Q->cnt_in+=1;
+    
     
 #ifdef SPINLOCK 
     pthread_spin_unlock(&(Q->insert_lock));
@@ -1363,15 +1402,17 @@ void oroLogRelaxed(Poro_t logFile, const char* format,  ...) {
 #endif        
     
     assert_msg(ENTRY != NULL,"Got non valid Queue element pointer");
-    memset(ENTRY,0,sizeof (Q_element));
+    //memset(ENTRY,0,sizeof (Q_element));
     
     
     
     
-    errno = 0;
+    //errno = 0;
     va_start(arglist, format); //LAST PARAM!!!
     
     uintptr_t *p = ENTRY->params;
+    
+    ENTRY->params_free_mask=(uintptr_t)0;
 
     const char *string = format;
     int num = 0;
@@ -1432,10 +1473,13 @@ exit_parsing:
     ENTRY->format_string = format;
     ENTRY->num = num; //количество либо 0 либо больше нуля
     
+    
     assert_msg(num <= PARAMS_FIXED_NUM, "NUM is limited! MAX: " __STRING(PARAMS_FIXED_NUM));
     
     ENTRY->realtime = time;
+    ENTRY->next=NULL;
     
+    Q_NEXT_FENCE;
     
 #ifdef SPINLOCK 
     pthread_spin_lock(&(Q->insert_lock));
@@ -1587,7 +1631,7 @@ void oroLogRelaxed_Q(Poro_t logFile, const char* format,  ...) {
     
     
     
-    errno = 0;
+    //errno = 0;
     va_start(arglist, format); //LAST PARAM!!!
     
     uintptr_t *p = ENTRY->params;
@@ -1668,6 +1712,7 @@ exit_parsing:
     
     ENTRY->realtime = time;
     
+    Q_NEXT_FENCE;
     
 #ifdef SPINLOCK 
     pthread_spin_lock(&(Q->insert_lock));
@@ -1752,7 +1797,7 @@ void oroLogRelaxed_wojt(Poro_t logFile, const char* format,  ...) {
     
     
     
-    errno = 0;
+    //errno = 0;
     va_start(arglist, format); //LAST PARAM!!!
     
     uintptr_t *p = ENTRY->params;
@@ -2138,9 +2183,9 @@ void oroLogFull(Poro_t logFile, oroObj_t *obj, const char* format,  ...) {
     
     do {
         va_start(arglist, format); //LAST PARAM!!!
-        errno = 0;
+        //errno = 0;
         n = vsnprintf(obj->buf, obj->n, format, arglist);
-        assert_perror(errno);
+        //assert_perror(errno);
         va_end(arglist);
         if (n >= obj->n) {
             size_t need = n  -  obj->n  ;
@@ -2172,9 +2217,11 @@ void oroLogFull(Poro_t logFile, oroObj_t *obj, const char* format,  ...) {
     
     ENTRY->num = -1; // need FREE on `format_string`
     
+    ENTRY->params_free_mask=(uintptr_t)0;
     
     ENTRY->realtime = time;
     
+    Q_NEXT_FENCE;
     
     //if(1)
     //    ENTRY->tid = pthread_self();
@@ -2259,7 +2306,7 @@ size_t oroLogFulla(Poro_t logFile, size_t expecting_byte, const char* format,  .
 #endif        
     
     assert_msg(ENTRY != NULL,"Got non valid Queue element pointer");
-    memset(ENTRY,0,sizeof (Q_element));
+    //memset(ENTRY,0,sizeof (Q_element));
 
     int n=0;
     
@@ -2267,9 +2314,9 @@ size_t oroLogFulla(Poro_t logFile, size_t expecting_byte, const char* format,  .
     
     do {
         va_start(arglist, format); //LAST PARAM!!!
-        errno = 0;
+        //errno = 0;
         n = vsnprintf(buf, expecting_byte, format, arglist);
-        assert_perror(errno);
+        //assert_perror(errno);
         va_end(arglist);
         if (n >= expecting_byte) {
             size_t need = n  -  expecting_byte  ;
@@ -2291,11 +2338,15 @@ size_t oroLogFulla(Poro_t logFile, size_t expecting_byte, const char* format,  .
     
     ENTRY->num = -1; // need FREE on `format_string`
     
+    ENTRY->params_free_mask=(uintptr_t)0;
+    
     ENTRY->realtime = time;
     
+    ENTRY->next=NULL;
     
-    //if(1)
-    //    ENTRY->tid = pthread_self();
+    Q_NEXT_FENCE;
+    
+    
     
 #ifdef SPINLOCK 
     pthread_spin_lock(&(Q->insert_lock));

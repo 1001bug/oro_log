@@ -35,22 +35,32 @@
 
 
 
+
+
+
 #define LOG_HEADER ""
 //#define LOG_HEADER "%02i:%02i:%02i.%09li|%li%09li;"
 #define NN 1000000
 /*
  * 
  */
-#define MFENCE    __asm__ __volatile__ ("mfence" ::: "memory") 
-#define LFENCE    __asm__ __volatile__ ("lfence" ::: "memory") 
+#define MFENCE    __asm__ __volatile__ ("mfence" ::: "memory")
+#define LFENCE    __asm__ __volatile__ ("lfence" ::: "memory")
+#define SFENCE    __asm__ __volatile__ ("sfence" ::: "memory")
+
 #define _RDTSCP(V) __asm__ __volatile__("rdtscp;shl $32, %%rdx;or %%rdx, %%rax":"=a"(V):: "%rcx", "%rdx")
 #define RDTSCP(V) MFENCE;\
 _RDTSCP(V);\
 MFENCE
 
 
+#define CYCLES 1
+#define CLOCK  2
+#define TIME_SPEC_DIFF(S,E) (((E).tv_sec * 1000000000L + (E).tv_nsec)-((S).tv_sec * 1000000000L + (S).tv_nsec))
+#define TIME_SPEC_NANO(S) ((S).tv_sec * 1000000000L + (S).tv_nsec)
+
 extern const char *__progname; //иммя программы без прибамбасов
-void PRINT_STAT(const char *name, uint64_t *time_S, uint64_t *time_E, uint64_t *time_Dif, int cnt);
+void PRINT_STAT(const char *name, uint64_t *time_S, uint64_t *time_E, uint64_t *time_Dif, int cnt, int ts_source);
 
 void on_error_stderr(char *fstring, ...) {
     va_list arglist;
@@ -232,6 +242,8 @@ int main(int argc, char** argv) {
 
     struct timespec cur = {0};
     struct timespec stop = {0};
+    struct timespec more = {0};
+    struct timespec more2 = {0};
 
     clock_gettime(CLOCK_ID_MEASURE, &cur);
 
@@ -325,7 +337,71 @@ int main(int argc, char** argv) {
      
      */
 /////////////////////////////****************************////////////
-
+    start=0;
+    //CLOCK_THREAD_CPUTIME_ID
+    __clockid_t cl_1 = 0;
+    __clockid_t cl_2 = 0;
+    
+    //pthread_getcpuclockid()
+    //clock_getcpuclockid
+    
+    //cur PROCESS
+    if(clock_getcpuclockid(0,&cl_1)!=0){
+        perror("clock_getcpuclockid");
+    }
+    if(clock_gettime(cl_1,&cur)!=0){
+        perror("clock_gettime w cl");
+    }
+    
+    //cur THREAD
+    if(pthread_getcpuclockid(pthread_self(),&cl_2)!=0){
+        perror("clock_getcpuclockid");
+    }
+    
+    if(clock_gettime(cl_2,&stop)!=0){
+        perror("clock_gettime w cl");
+    }
+    
+    clock_gettime(CLOCK_THREAD_CPUTIME_ID,&more);
+    clock_gettime(CLOCK_PROCESS_CPUTIME_ID,&more2);
+    
+    printf("%li.%09li clock_getcpuclockid(%i)  -> %i\n",cur.tv_sec,cur.tv_nsec,0,cl_1);
+    printf("%li.%09li pthread_getcpuclockid(%lu) -> %i\n",stop.tv_sec,stop.tv_nsec,pthread_self(),cl_2);
+    printf("%li.%09li CLOCK_THREAD_CPUTIME_ID -> %i\n",more.tv_sec,more.tv_nsec,CLOCK_THREAD_CPUTIME_ID);
+    printf("%li.%09li CLOCK_PROCESS_CPUTIME_ID -> %i\n",more2.tv_sec,more2.tv_nsec,CLOCK_PROCESS_CPUTIME_ID);
+    printf("\n\n\n");
+    
+    
+    
+            
+    for (int r = 0; r < NN; r++) {
+        clock_gettime(CLOCK_ID_MEASURE,&cur);
+        
+        SFENCE;
+        
+        oroLogFixedA(LOG, "oroLogFixedA CLOCK_ID_MEASURE   entry str='%s' %u with TIME=%li%09li anf current sec number %li an more over and so on %llu:%llu"
+                ,__ASSERT_FUNCTION
+                ,NN
+                ,cur.tv_sec
+                ,cur.tv_nsec
+                ,55<<10
+                ,start,cycles_in_one_usec
+                );
+        MFENCE;
+                
+        clock_gettime(CLOCK_ID_MEASURE,&stop);
+        rdtscp_S[r]=   TIME_SPEC_NANO(cur);
+        rdtscp_E[r]=   TIME_SPEC_NANO(stop);
+        
+    }
+    PRINT_STAT("logLogFixed CLOCK_ID_MEASURE", rdtscp_S, rdtscp_E, rdtscp_dif, NN, CLOCK);
+    sleep(1);
+    
+    
+    
+    
+    
+    
     for (int r = 0; r < NN; r++) {
         RDTSCP(start);
         oroLogFixedA(LOG, "1ogLogFixed   entry str='%s' %u with TIME=%li%09li anf current sec number %li an more over and so on %llu:%llu"
@@ -338,7 +414,7 @@ int main(int argc, char** argv) {
                 );
         RDTSCP(rdtscp_E[r]);rdtscp_S[r]=start;
     }
-    PRINT_STAT("logLogFixed 1", rdtscp_S, rdtscp_E, rdtscp_dif, NN);
+    PRINT_STAT("logLogFixed 1", rdtscp_S, rdtscp_E, rdtscp_dif, NN, CYCLES);
     sleep(1);
     
     
@@ -356,7 +432,7 @@ int main(int argc, char** argv) {
                 );
         RDTSCP(rdtscp_E[r]);rdtscp_S[r]=start;
     }
-    PRINT_STAT("logLogFixed 2", rdtscp_S, rdtscp_E, rdtscp_dif, NN);
+    PRINT_STAT("logLogFixed 2", rdtscp_S, rdtscp_E, rdtscp_dif, NN, CYCLES);
     sleep(1);
     
     for (int r = 0; r < NN; r++) {
@@ -371,7 +447,7 @@ int main(int argc, char** argv) {
                 );
         RDTSCP(rdtscp_E[r]);rdtscp_S[r]=start;
     }
-    PRINT_STAT("logLogFixed 3", rdtscp_S, rdtscp_E, rdtscp_dif, NN);
+    PRINT_STAT("logLogFixed 3", rdtscp_S, rdtscp_E, rdtscp_dif, NN, CYCLES);
     sleep(1);
     
     for (int r = 0; r < NN; r++) {
@@ -386,7 +462,7 @@ int main(int argc, char** argv) {
                 );
         RDTSCP(rdtscp_E[r]);rdtscp_S[r]=start;
     }
-    PRINT_STAT("logLogFixed 4", rdtscp_S, rdtscp_E, rdtscp_dif, NN);
+    PRINT_STAT("logLogFixed 4", rdtscp_S, rdtscp_E, rdtscp_dif, NN, CYCLES);
     sleep(1);
     
     for (int r = 0; r < NN; r++) {
@@ -402,7 +478,7 @@ int main(int argc, char** argv) {
                 );
         RDTSCP(rdtscp_E[r]);rdtscp_S[r]=start;
     }
-    PRINT_STAT("logLogFixed 5", rdtscp_S, rdtscp_E, rdtscp_dif, NN);
+    PRINT_STAT("logLogFixed 5", rdtscp_S, rdtscp_E, rdtscp_dif, NN, CYCLES);
     sleep(1);
     
   // goto end; /////////////////////////////////////////// STOP HERE ////////////////////////////////////////////
@@ -419,7 +495,7 @@ int main(int argc, char** argv) {
                 );
         RDTSCP(rdtscp_E[r]);rdtscp_S[r]=start;
     }
-    PRINT_STAT("logLogRelaxed Cheat", rdtscp_S, rdtscp_E, rdtscp_dif, NN);
+    PRINT_STAT("logLogRelaxed Cheat", rdtscp_S, rdtscp_E, rdtscp_dif, NN, CYCLES);
     sleep(1);
     
     for (int r = 0; r < NN; r++) {
@@ -434,7 +510,7 @@ int main(int argc, char** argv) {
                 );
         RDTSCP(rdtscp_E[r]);rdtscp_S[r]=start;
     }
-    PRINT_STAT("logLogRelaxed Cheat", rdtscp_S, rdtscp_E, rdtscp_dif, NN);
+    PRINT_STAT("logLogRelaxed Cheat", rdtscp_S, rdtscp_E, rdtscp_dif, NN, CYCLES);
     sleep(1);
     
     for (int r = 0; r < NN; r++) {
@@ -449,7 +525,7 @@ int main(int argc, char** argv) {
                 );
         RDTSCP(rdtscp_E[r]);rdtscp_S[r]=start;
     }
-    PRINT_STAT("logLogRelaxed_Q Cheat", rdtscp_S, rdtscp_E, rdtscp_dif, NN);
+    PRINT_STAT("logLogRelaxed_Q Cheat", rdtscp_S, rdtscp_E, rdtscp_dif, NN, CYCLES);
     sleep(1);
     
     
@@ -465,7 +541,7 @@ int main(int argc, char** argv) {
                 );
         RDTSCP(rdtscp_E[r]);rdtscp_S[r]=start;
     }
-    PRINT_STAT("logLogRelaxed_Q Cheat", rdtscp_S, rdtscp_E, rdtscp_dif, NN);
+    PRINT_STAT("logLogRelaxed_Q Cheat", rdtscp_S, rdtscp_E, rdtscp_dif, NN, CYCLES);
     sleep(1);
     
    
@@ -484,7 +560,7 @@ int main(int argc, char** argv) {
                 );
         RDTSCP(rdtscp_E[r]);rdtscp_S[r]=start;
     }
-    PRINT_STAT("logLogRelaxed", rdtscp_S, rdtscp_E, rdtscp_dif, NN);
+    PRINT_STAT("logLogRelaxed", rdtscp_S, rdtscp_E, rdtscp_dif, NN, CYCLES);
     sleep(1);
     
     
@@ -501,7 +577,7 @@ int main(int argc, char** argv) {
                 );
         RDTSCP(rdtscp_E[r]);rdtscp_S[r]=start;
     }
-    PRINT_STAT("logLogFull", rdtscp_S, rdtscp_E, rdtscp_dif, NN);
+    PRINT_STAT("logLogFull", rdtscp_S, rdtscp_E, rdtscp_dif, NN, CYCLES);
     sleep(1);
 */
     
@@ -517,7 +593,7 @@ int main(int argc, char** argv) {
                 );
         RDTSCP(rdtscp_E[r]);rdtscp_S[r]=start;
     }
-    PRINT_STAT("logLogFull", rdtscp_S, rdtscp_E, rdtscp_dif, NN);
+    PRINT_STAT("logLogFull", rdtscp_S, rdtscp_E, rdtscp_dif, NN, CYCLES);
     sleep(1);
     for (int r = 0; r < NN; r++) {
         RDTSCP(start);
@@ -531,7 +607,7 @@ int main(int argc, char** argv) {
                 );
         RDTSCP(rdtscp_E[r]);rdtscp_S[r]=start;
     }
-    PRINT_STAT("logLogFull", rdtscp_S, rdtscp_E, rdtscp_dif, NN);
+    PRINT_STAT("logLogFull", rdtscp_S, rdtscp_E, rdtscp_dif, NN, CYCLES);
     sleep(1);
     
     for (int r = 0; r < NN; r++) {
@@ -546,7 +622,7 @@ int main(int argc, char** argv) {
                 );
         RDTSCP(rdtscp_E[r]);rdtscp_S[r]=start;
     }
-    PRINT_STAT("logLogFulla", rdtscp_S, rdtscp_E, rdtscp_dif, NN);
+    PRINT_STAT("logLogFulla", rdtscp_S, rdtscp_E, rdtscp_dif, NN, CYCLES);
     sleep(1);
     
     for (int r = 0; r < NN; r++) {
@@ -562,7 +638,7 @@ int main(int argc, char** argv) {
         RDTSCP(rdtscp_E[r]);rdtscp_S[r]=start;
         
     }
-    PRINT_STAT("logLogFulla", rdtscp_S, rdtscp_E, rdtscp_dif, NN);
+    PRINT_STAT("logLogFulla", rdtscp_S, rdtscp_E, rdtscp_dif, NN, CYCLES);
     sleep(1);
 
 
@@ -579,7 +655,7 @@ int main(int argc, char** argv) {
                 );
         RDTSCP(rdtscp_E[r]);rdtscp_S[r]=start;
     }
-    PRINT_STAT("fprintf", rdtscp_S, rdtscp_E, rdtscp_dif, NN);
+    PRINT_STAT("fprintf", rdtscp_S, rdtscp_E, rdtscp_dif, NN, CYCLES);
     fflush(OUT);
     sleep(1);
 
@@ -596,7 +672,7 @@ int main(int argc, char** argv) {
                 );
         RDTSCP(rdtscp_E[r]);rdtscp_S[r]=start;
     }
-    PRINT_STAT("logLogRelaxedDummy jt", rdtscp_S, rdtscp_E, rdtscp_dif, NN);
+    PRINT_STAT("logLogRelaxedDummy jt", rdtscp_S, rdtscp_E, rdtscp_dif, NN, CYCLES);
     sleep(1);
     
     for (int r = 0; r < NN; r++) {
@@ -610,7 +686,7 @@ int main(int argc, char** argv) {
                 );
         RDTSCP(rdtscp_E[r]);rdtscp_S[r]=start;
     }
-    PRINT_STAT("logLogRelaxedDummy wo jt", rdtscp_S, rdtscp_E, rdtscp_dif, NN);
+    PRINT_STAT("logLogRelaxedDummy wo jt", rdtscp_S, rdtscp_E, rdtscp_dif, NN, CYCLES);
     sleep(1);
     
 
@@ -676,7 +752,7 @@ end:
     return (EXIT_SUCCESS);
 }
 
-void PRINT_STAT(const char *name, uint64_t *time_S, uint64_t *time_E, uint64_t *time_Dif, int count) {
+void PRINT_STAT(const char *name, uint64_t *time_S, uint64_t *time_E, uint64_t *time_Dif, int count, int ts_source) {
 
 
 
@@ -701,9 +777,9 @@ void PRINT_STAT(const char *name, uint64_t *time_S, uint64_t *time_E, uint64_t *
 
         if (tmp > 0) {
 
-#ifdef RDTSC_timesource
-            tmp = (tmp * 1000L) / cycles_in_one_usec;
-#endif 
+            if(ts_source==CYCLES){
+                tmp = (tmp * 1000L) / cycles_in_one_usec;
+            }
 
             time_Dif[cnt] = tmp;
             sum+=tmp;
