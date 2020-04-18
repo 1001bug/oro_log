@@ -16,6 +16,11 @@
  * remove errno on critical path
  * remove memset where not realy needed
  * mlock and populate all Qs
+ * Relaxed - table with goto insteadof numbers
+ * remove all testing functions
+ * finaly! replace Full whis Fulla
+ * 
+ * some placese marked with `STDERR OUTPUT !!!!`
  */
 
 
@@ -39,6 +44,8 @@
 #include <bits/stdio_lim.h>
 #include <fcntl.h>
 #include <sys/mman.h>
+#include <sys/stat.h>
+
 
 
 #ifndef NOOPTY
@@ -112,7 +119,6 @@ extern const char *__progname;
 #define NOSPINLOCK
 
 //return queue from logFlush to logLog and def size
-#define RETURN
 #define RETURN_QUANTITY 2000
 
 //hardcode for now. it is usual to sleep for 10 millisec
@@ -127,7 +133,7 @@ static const size_t logLogFullObjBufLen = 2048;
 static int time_source = CLOCK_ID_WALL_FAST; //global. same for all logs
 
 //not need any more
-static unsigned long logQueueSize(Poro_t logFile, void (*error_fun)(char *fstring,...));
+//static unsigned long logQueueSize(Poro_t logFile, void (*error_fun)(char *fstring,...));
 
 
 
@@ -172,7 +178,8 @@ static void logRedirect_stderr(Poro_t logFile, const char *funname, struct times
 static int str_s_cpy(char *dest, const char *src, size_t sizeof_dest);
 static void prepare_Q();
 //size_t const cache_line_size = 64; sysconf(_SC_LEVEL3_CACHE_LINESIZE)
-static void *x_aligned_zeroed_locked_alloc (size_t __size);
+static void *x_alloc_aligned_zeroed_locked (size_t __size, int must_mlock);
+static void *x_alloc_aligned_zeroed_locked_page (size_t __size, int must_mlock);
 
 static volatile int requestForLogsTruncate = 0;
 
@@ -184,14 +191,20 @@ typedef struct Q_element{
     const char *format_string;
     uintptr_t params[PARAMS_FIXED_NUM];
     uintptr_t params_free_mask;
-    int64_t num;
-    //pthread_t tid __attribute__ ((aligned(sizeof(uintptr_t)))); //не знаю, это выравнивать надо... должен быть 8 байт
+    int num;
+    //int64_t element_number;
+    int is_alloc_addr;//when allock by pagesize only first element can be free()
     
-    struct Q_element *next;
+    struct Q_element *next __attribute__ ((aligned(sizeof(uintptr_t))));;
     
     
 } Q_element __attribute__ ((aligned(sizeof(uintptr_t))));
 
+typedef struct generic_list{
+    void *p;
+    long n;
+    struct generic_list *next;
+} generic_list;
 
 typedef struct LOG_Q {
     //сгруппировать поля по пользователям
@@ -210,7 +223,7 @@ typedef struct LOG_Q {
     Q_element *tail __attribute__ ((aligned));
     Q_element *return_head __attribute__ ((aligned));
     
-    
+    generic_list *free_list;
     
     
 } LOG_QUEUE __attribute__ ((aligned));
@@ -224,6 +237,8 @@ struct FD_LIST_ITEM{
     //clockid_t time_source; //usualy no reason to use different time source
     //int timestamp_utc;     //utc is for mononic time source
     struct FD_LIST_ITEM *next;
+    int withlock;
+    //int do_mlock;
     
     volatile int insert_forbidden __attribute__ ((aligned(sizeof(uintptr_t))));
     
@@ -254,7 +269,10 @@ void oroLogTruncate(){
     return;
 }
 
-static void *x_aligned_zeroed_locked_alloc (size_t __size){
+
+//как-то вернуть что mlock не удался???
+static void *x_alloc_aligned_zeroed_locked (size_t __size, int must_mlock){
+    //rount to word size
     size_t new_size = (((__size - 1) / sizeof(uintptr_t)) + 1) * sizeof(uintptr_t);
             
     void * P = aligned_alloc(sizeof(uintptr_t), new_size);
@@ -263,15 +281,67 @@ static void *x_aligned_zeroed_locked_alloc (size_t __size){
         return NULL;
     memset(P,0,new_size);
     errno=0;
-    if(mlock(P,new_size)!=0){
-        perror("mlock in x_aligned_zeroed_locked_alloc");
-        free(P);
-        P=NULL;
-    }
+    if (must_mlock >= 0) //-1 do not lock; 0 lock if possible; 1 exit on lock fail
+        if (mlock(P, new_size) != 0) {
+            if (must_mlock == 1) {
+                //STDERR OUTPUT !!!!
+                fprintf(stderr, "mlock in x_alloc_aligned_zeroed_locked failed: %s\n",strerror(errno));
+                free(P);
+                P = NULL;
+            }
+        }
     return P;
     
     
 }
+//__size % pagesize == 0  !!!!
+static void *x_alloc_aligned_zeroed_locked_page (size_t __size, int must_mlock){
+    
+    size_t pagesize = getpagesize();
+    assert((pagesize % __size)==0);
+    
+    void * ptr = aligned_alloc(pagesize, __size);
+    assert( ((uintptr_t)ptr % pagesize) == 0);
+     
+    if(ptr==NULL)
+        return NULL;
+    memset(ptr,0,__size);
+    errno=0;
+    if (must_mlock >= 0) //-1 do not lock; 0 lock if possible; 1 exit on lock fail
+        if (mlock(ptr, __size) != 0) {
+            if (must_mlock == 1) {
+                //STDERR OUTPUT !!!!
+                fprintf(stderr, "mlock in x_alloc_aligned_zeroed_locked_page failed: %s\n",strerror(errno));
+                free(ptr);
+                ptr = NULL;
+            }
+        }
+    return ptr;
+    
+    
+}
+
+//static Q_element * alloc_Q_list_inside_page(Q_element * tail, int page_num, int lock) {
+static Q_element * alloc_Q_list_inside_page(Q_element * tail, int lock) {
+    size_t pagesize = getpagesize();
+    size_t n_of_Qe_in_one_page = pagesize / sizeof (Q_element);
+    //pagesize/sizeof (Q_element)
+
+    Q_element *Q_e_ptr = x_alloc_aligned_zeroed_locked_page(pagesize, lock);
+    assert_msg(Q_e_ptr != NULL, "x_alloc_aligned_zeroed_locked_page return NULL");
+
+    Q_e_ptr->is_alloc_addr = 1;
+
+    for (int e = 0; e < (n_of_Qe_in_one_page - 1); e++) {
+        Q_e_ptr[e].next = &(Q_e_ptr[e + 1]);
+        //Q_e_ptr[e].element_number = (e + 1)+( page_num * n_of_Qe_in_one_page);
+    }
+    //Q_e_ptr[n_of_Qe_in_one_page - 1].element_number = (n_of_Qe_in_one_page - 1 + 1)+( page_num * n_of_Qe_in_one_page);
+    Q_e_ptr[n_of_Qe_in_one_page - 1].next = tail;
+
+    return Q_e_ptr;
+}
+
 static void * logWrite_thread(void *e_fun){
     //__suseconds_t usec_sleep = *(__suseconds_t *) S;
     __suseconds_t usec_sleep = logFlush_empty_queue_sleep ; //GLOBAL
@@ -580,14 +650,12 @@ static void * logWrite_thread(void *e_fun){
                 write_cnt++;
 
                 
-#ifndef RETURN
-                free(Q->tail);
-#else                
                 //нужно ли делать memset(0)?? можно потом не делать. или нельзя?
                 Q->tail->next=NULL;
                 Q->return_head->next=Q->tail;
                 Q->return_head=Q->tail;
-#endif                
+
+                
                 Q->tail = E;
                 Q->cnt_out+=1;
 
@@ -814,7 +882,8 @@ int oroWriterStop(long int wait_usec, void (*error_fun)(char *fstring,...)){
     
 }
 
-
+/*
+//not used for now
 static unsigned long logQueueSize(Poro_t logFile, void (*error_fun)(char *fstring,...)){
     struct FD_LIST_ITEM *LOG=(struct FD_LIST_ITEM *)logFile;
     
@@ -824,6 +893,8 @@ static unsigned long logQueueSize(Poro_t logFile, void (*error_fun)(char *fstrin
     
     
 }
+//*/
+
 
 //DANGER!! ACHTUNG!!! shuold be called ONLY from logWriteSTOP
 static int logCleaup(void (*error_fun)(char *fstring,...)){ 
@@ -865,35 +936,48 @@ static int logCleaup(void (*error_fun)(char *fstring,...)){
                 LOG->custom_io_buf=NULL;
             }
             
-            //основная очередь
-            //должен был остаться толкьо один элемент, возможно чтоит проверить!!!!!
-            free(Q->head);
+
+            //т.к. аллокация страницами мы не можем осободить серединку
+            //free(Q->head);
             Q->head=NULL;
 
-#ifdef RETURN
-            //если у нас была обратная очередь, то съесть ее с конца
+
             if(Q->return_tail){
-                while(Q->return_tail->next){
-                    //fprintf(stderr,"S %p n-> %p\n",Q->return_tail,Q->return_tail->next);
-                Q_element *t = Q->return_tail->next;
-                free(Q->return_tail);
-                Q->return_tail = t;
-                //fprintf(stderr,"E %p n-> %p\n\n",Q->return_tail,Q->return_tail->next);
+               
+                long n=0;
+                generic_list *L = NULL;
+                
+                for(Q_element *tmp=Q->return_tail;tmp!=NULL;tmp=tmp->next){
+                    if(tmp->is_alloc_addr){
+                        generic_list *newL = calloc(1,sizeof(generic_list));
+                        newL->p=tmp;
+                        newL->n=++n;
+                        newL->next=L;
+                        L=newL;
+                    }
                 }
-                free(Q->return_tail);
+                for(generic_list *tmp=L;tmp!=NULL;){
+                    generic_list *next=tmp->next;
+                    free(tmp->p);
+                    free(tmp);
+                    tmp=next;
+                }
+                
                 Q->return_tail=NULL;
+
             }
             
-#endif            
+          
             
     }
     
     //race!!! if logLog* run same time
     FD_LIST_ITEM_NUM=0;
     for (struct FD_LIST_ITEM * LOG=FD_LIST;LOG;){
-        struct FD_LIST_ITEM *tmp=LOG=LOG->next;
+        struct FD_LIST_ITEM *next=LOG->next;
+        //fprintf(stderr,"FREE LOG %p\n",LOG);
         free(LOG);
-        LOG=tmp;
+        LOG=next;
     }
         
     
@@ -919,7 +1003,13 @@ Poro_t oroLogOpen(oro_attrs_t config, void (*error_fun)(char *fstring,...)){
     if(config.return_q == 0)
         config.return_q = RETURN_QUANTITY;
     
-    
+    size_t pagesize = 4096;
+        
+    {
+        int t_ps;
+        if ((t_ps = getpagesize()) > 0)
+            pagesize = t_ps;
+    }
     
     //переделать бы на список. тога можно добавлять не зависимо от того запущен FLUSH тред или нет. 
     //а так realoc всё сломает
@@ -940,47 +1030,44 @@ Poro_t oroLogOpen(oro_attrs_t config, void (*error_fun)(char *fstring,...)){
     
     //assert(mtx==0);
     
-    struct FD_LIST_ITEM * LOG = x_aligned_zeroed_locked_alloc(sizeof(struct FD_LIST_ITEM));
+    struct FD_LIST_ITEM * LOG = x_alloc_aligned_zeroed_locked(sizeof(struct FD_LIST_ITEM),config.do_mlock);
     assert_msg(LOG != NULL,"new LOG aligned_alloc failed");
     
-    
-    //memset(LOG,0,sizeof(struct FD_LIST_ITEM));
-    
-    
-    
-    
-    
-            
-    errno = 0;
-    
-    //Q_element *passive = calloc(1, sizeof (Q_element));
-    Q_element *passive = x_aligned_zeroed_locked_alloc(sizeof (Q_element));
-    assert_msg(passive != NULL, "Q_element *passive = aligned_alloc");
-        
-    
-    //memset(passive,0,sizeof (Q_element));
-    
-    LOG->QUEUE.head=passive;
-    LOG->QUEUE.tail=passive;
-    
-#ifdef RETURN
-        Q_element *passive2 = x_aligned_zeroed_locked_alloc(sizeof (Q_element));
-        //memset(passive2,0,sizeof (Q_element));
-        LOG->QUEUE.return_head = passive2;
-        LOG->QUEUE.return_tail=passive2;
-        
-        
-        for(int p=0;p<config.return_q;p++){
-             Q_element *P = x_aligned_zeroed_locked_alloc(sizeof (Q_element));
-             assert_msg(P != NULL, "Q_element aligned_alloc failed");
-             //memset(P,0,sizeof (Q_element));
-             
-             LOG->QUEUE.return_head->next = P;
-             LOG->QUEUE.return_head = P;
-        }
-        
-#endif    
-    
+
+
+
+    size_t n_of_Qe_in_one_page = pagesize / sizeof (Q_element);
+    config.return_q = (((config.return_q - 1) / n_of_Qe_in_one_page) + 1) * n_of_Qe_in_one_page;
+    size_t total_pages_we_need = config.return_q / n_of_Qe_in_one_page;
+
+
+    Q_element *HEAD = NULL;
+    Q_element *TAIL = NULL;
+
+    //формируем в голову
+    for (int p = 0; p < total_pages_we_need; p++) {
+        HEAD = alloc_Q_list_inside_page(HEAD, config.do_mlock);
+    }
+    //поиск конца
+    for (Q_element *tmp = HEAD; tmp != NULL; tmp = tmp->next) {
+        if (tmp->next == NULL)
+            TAIL = tmp;
+    }
+
+
+    LOG->QUEUE.return_head = TAIL;
+    LOG->QUEUE.return_tail = HEAD->next;
+
+    //first element use for WriteThread passiv element
+    LOG->QUEUE.head = HEAD;
+    LOG->QUEUE.tail = HEAD;
+    HEAD->next = NULL;
+
+
+
+
+
+
     //int p = PTHREAD_PROCESS_SHARED;
     errno=0;
     assert_msg(
@@ -1144,17 +1231,46 @@ Poro_t oroLogOpen(oro_attrs_t config, void (*error_fun)(char *fstring,...)){
     
     
     if(config.bufsize>0){
-        LOG->custom_io_buf = x_aligned_zeroed_locked_alloc(config.bufsize);
+        size_t st_blksize = 4096;
+        
+        
+        struct stat sb;
+        errno=0;
+        if(fstat(fileno(t),&sb)==0){
+            if(sb.st_blksize>0)
+                st_blksize=sb.st_blksize;
+        }else{
+            if(error_fun)error_fun(
+                ERR_MESSAGE("fstat to get st_blksize FAILed for '%s', err: %s\n",log_filename_template, strerror(errno))
+            );
+        }
+        //round bufsize to st_blksize
+        config.bufsize = (((config.bufsize-1)/st_blksize)+1)*st_blksize;
+        
+        //round alloc to pagesize
+        size_t alloc_size = (((config.bufsize-1)/pagesize)+1)*pagesize;
+        //maybe round alloc size to page size? but pass to setvbuf size of config.bufsize (end of alloca spase not used)
+        LOG->custom_io_buf = x_alloc_aligned_zeroed_locked_page(alloc_size,config.do_mlock);
         assert_msg(LOG->custom_io_buf != NULL, "custom_io_buf = aligned_alloc");
         errno=0;
+        //set custom buf with _IOFBF  (size of buf!!! no alloc size!!!! if alloc>buf then tail not used)
         if(setvbuf(t,LOG->custom_io_buf,_IOFBF,config.bufsize) !=0){
             if(error_fun)error_fun(
-                ERR_MESSAGE("setvbuf FAILed for '%s', err: %s\n",log_filename_template, strerror(errno))
+                ERR_MESSAGE("setvbuf custom buf size FAILed for '%s', err: %s\n",log_filename_template, strerror(errno))
             );
             goto logOpen__exit;
         }
         //Z = __fbufsize(t);
         //fprintf(stderr,"__fbufsize: %zu\n",Z); 
+    }else{
+        errno=0;
+        //just set _IOFBF (buf size should be st_blksize by default)
+        if(setvbuf(t,NULL,_IOFBF,0) !=0){
+            if(error_fun)error_fun(
+                ERR_MESSAGE("setvbuf _IOFBF FAILed for '%s', err: %s\n",log_filename_template, strerror(errno))
+            );
+            goto logOpen__exit;
+        }
     }
     
     fprintf(t,"# File opened. time_source %i, timestamp_utc %i, bufsize %zi, return_q %i\n",config.time_source,config.timestamp_utc,config.bufsize,config.return_q);
@@ -1176,6 +1292,14 @@ Poro_t oroLogOpen(oro_attrs_t config, void (*error_fun)(char *fstring,...)){
     
     //until logFlush starts
     LOG->insert_forbidden = 1;
+    
+    //just for test. only Fixed and Relaxed is affected by lock. maybe make _unlocked fun var?
+    if(config.nospinlock == 1)
+        LOG->withlock = 0;
+    else
+        LOG->withlock = 1;
+    
+    //LOG->do_mlock=config.do_mlock;
     
     
     //insert new log to end of list
@@ -1202,7 +1326,13 @@ logOpen__exit:
     return 0;
 }
 
+static void logRedirect_stderr_f(Poro_t logFile, const char *funname, struct timespec time, const char* format, ...) {
+    va_list arglist;
+    va_start(arglist, format);
+    logRedirect_stderr(logFile, __func__, time, format, arglist);
+    va_end(arglist);
 
+}
 static void logRedirect_stderr(Poro_t logFile, const char *funname, struct timespec time, const char* format, va_list ap){
     //lock
     char *eformat;
@@ -1219,6 +1349,81 @@ static void logRedirect_stderr(Poro_t logFile, const char *funname, struct times
     //unlock
 }
 
+
+
+void oroLogFixed5_unlocked(Poro_t logFile, const char* format, uintptr_t p1, uintptr_t p2, uintptr_t p3, uintptr_t p4, uintptr_t p5){
+    _Static_assert(PARAMS_FIXED_NUM >= 5, "oroLogFixed8 need 8 params to store");
+    
+    struct timespec time={0};
+    //time_source is global
+    if(time_source>=0)
+        clock_gettime(time_source,&time);
+    
+    __builtin_prefetch((struct FD_LIST_ITEM *)logFile);
+    struct FD_LIST_ITEM *LOG=(struct FD_LIST_ITEM *)logFile;
+    
+    
+    //Do we need sanity check?
+    assert_msg(LOG->withlock == 0, "Use oroLogFixed5_unlocked for LOG expecting locks");
+    
+
+    if(UNLIKELY(LOG->insert_forbidden == 1)){
+        logRedirect_stderr_f(logFile,__func__,time,format,p1,p2,p3,p4,p5);
+        return;
+    }
+    
+    
+    
+    Q_element *ENTRY;
+    LOG_QUEUE *Q = &(LOG->QUEUE);
+    
+    //add some to Q if it is empty
+    if(UNLIKELY(Q->return_tail->next == NULL)){
+        //mLOCK after start is dangeruus!!!!
+        Q->return_tail=alloc_Q_list_inside_page(Q->return_tail,-1);
+        //fprintf(stderr,"RETURN Q EMPTY\n");
+    }
+    //not checking. Under lock it does not metter
+    //alloc_Q_list_inside_page does abort on problem with memory
+    ENTRY = Q->return_tail;
+    Q->return_tail = Q->return_tail->next;
+    
+   
+    
+    //MFENCE;
+    //MFENCE_LITE;
+    
+
+    assert_msg(ENTRY != NULL,"Got non valid Queue element pointer");
+
+    
+    uintptr_t *p = ENTRY->params;
+    
+    p[0]=p1;
+    p[1]=p2;
+    p[2]=p3;
+    p[3]=p4;
+    p[4]=p5;
+
+    ENTRY->format_string = format;
+    ENTRY->num = 5;
+    ENTRY->params_free_mask=(uintptr_t)0;
+
+    ENTRY->realtime = time;
+    ENTRY->next=NULL;
+    
+    Q_NEXT_FENCE;
+    
+    
+    
+    /*next!*/
+    Q->head->next=ENTRY;
+    Q->head=ENTRY;
+    Q->cnt_in+=1;
+    
+    
+}
+
 /**
  * Log format string with fixed numer of prameters. Only copyble params allowed! Do not log non static strings! Use macro oroLogFixedA to count NUM at compille time
  * @param logFile
@@ -1228,20 +1433,22 @@ static void logRedirect_stderr(Poro_t logFile, const char *funname, struct times
  */
 void oroLogFixed(Poro_t logFile, size_t NUM, const char* format,  ...){
 
-    assert(logFile!=NULL);
-    assert_msg(NUM<=PARAMS_FIXED_NUM, "NUM is limited! MAX: " __STRING(PARAMS_FIXED_NUM));
-    
-    struct FD_LIST_ITEM *LOG=(struct FD_LIST_ITEM *)logFile;
-    
-    va_list arglist;
-    Q_element *ENTRY;
     struct timespec time={0};
     
-    
+    //time_source is global
     if(time_source>=0)
         clock_gettime(time_source,&time);
+
+    
+    //assert(logFile!=NULL);
+    assert_msg(NUM<=PARAMS_FIXED_NUM, "NUM is limited! MAX: " __STRING(PARAMS_FIXED_NUM));
+
+    
+    __builtin_prefetch((struct FD_LIST_ITEM *)logFile);
+    struct FD_LIST_ITEM *LOG=(struct FD_LIST_ITEM *)logFile;
     
     
+    va_list arglist;
     
 
     if(UNLIKELY(LOG->insert_forbidden == 1)){
@@ -1255,48 +1462,37 @@ void oroLogFixed(Poro_t logFile, size_t NUM, const char* format,  ...){
     
     
     
-    
+    Q_element *ENTRY;
     LOG_QUEUE *Q = &(LOG->QUEUE);
     
     
-#ifndef RETURN
-    ENTRY = aligned_alloc(sizeof(uintptr_t), sizeof (Q_element));
-#else
     
 //несколько тредов будут разбирать список, нужна блокировка. это конечно неахти
-#ifdef SPINLOCK 
-    pthread_spin_lock(&(Q->insert_lock));
-#endif    
+  
+    if(LOG->withlock)
+        pthread_spin_lock(&(Q->insert_lock));
     
-    //есть а наличии следующий эллемент? берем текущий, а слежующий помечем хвостом
-    if(LIKELY(Q->return_tail->next != NULL)){
-        ENTRY = Q->return_tail;
-        Q->return_tail = Q->return_tail->next;
-    }else{
-        ENTRY = aligned_alloc(sizeof(uintptr_t), sizeof (Q_element));
-#ifdef LOG_DEBUG
-        fprintf(stderr,"RETURN Q EMPTY\n");
-#endif        
+    //add some to Q if it is empty
+    if(UNLIKELY(Q->return_tail->next == NULL)){
+        //lock after start is dangerous!!! 
+        Q->return_tail=alloc_Q_list_inside_page(Q->return_tail,-1);
+        //fprintf(stderr,"RETURN Q EMPTY\n");
     }
+    //not checking. Under lock it does not metter
+    //alloc_Q_list_inside_page does abort on problem with memory
+    ENTRY = Q->return_tail;
+    Q->return_tail = Q->return_tail->next;
     
-#ifdef SPINLOCK
-    pthread_spin_unlock(&(Q->insert_lock));
-#endif
+
+    if(LOG->withlock)
+        pthread_spin_unlock(&(Q->insert_lock));
    
-    
-#endif    
-    
-    
- 
     
     //MFENCE;
     //MFENCE_LITE;
     
     //неважно какой истоник элемента - обнулить!
     assert_msg(ENTRY != NULL,"Got non valid Queue element pointer");
-    //memset(ENTRY,0,sizeof (Q_element));
-    
-    
     
     uintptr_t *p = ENTRY->params;
 
@@ -1316,28 +1512,18 @@ void oroLogFixed(Poro_t logFile, size_t NUM, const char* format,  ...){
     ENTRY->realtime = time;
     ENTRY->next=NULL;
     
-#ifdef SPINLOCK 
-    //очередь одна, вставка многими - нужна блокировка
-    pthread_spin_lock(&(Q->insert_lock));
-#endif    
-    
     Q_NEXT_FENCE;
     
-    //MFENCE;
-    
-    //мем фенс!!!
-    //__sync_synchronize;
-    //__asm__ __volatile__("":::"memory");
+    if(LOG->withlock)
+        pthread_spin_lock(&(Q->insert_lock));
     
     /*next!*/
     Q->head->next=ENTRY;
     Q->head=ENTRY;
     Q->cnt_in+=1;
     
-    
-#ifdef SPINLOCK 
-    pthread_spin_unlock(&(Q->insert_lock));
-#endif    
+    if(LOG->withlock)
+        pthread_spin_unlock(&(Q->insert_lock));
     
     
 }
@@ -1349,65 +1535,46 @@ void oroLogFixed(Poro_t logFile, size_t NUM, const char* format,  ...){
  */
 void oroLogRelaxed(Poro_t logFile, const char* format,  ...) {
     
-
-    assert(logFile!=0);
-    
-    struct FD_LIST_ITEM *LOG=(struct FD_LIST_ITEM *)logFile;
-    va_list arglist;
-    Q_element *ENTRY;
-    
-        struct timespec time={0};
+    struct timespec time={0};
     
     
     if(time_source>=0)
         clock_gettime(time_source,&time);
 
+    __builtin_prefetch((struct FD_LIST_ITEM *)logFile);
+    struct FD_LIST_ITEM *LOG=(struct FD_LIST_ITEM *)logFile;
+
+    va_list arglist;
     
     if(UNLIKELY(LOG->insert_forbidden == 1)){
-        
         va_start(arglist, format);
         logRedirect_stderr(logFile,__func__,time,format,arglist);
         va_end(arglist);
-        
         return;
     }
     
     
-    
+    Q_element *ENTRY;
     LOG_QUEUE *Q = &(LOG->QUEUE);
     
-#ifndef RETURN
-    ENTRY = aligned_alloc(sizeof(uintptr_t), sizeof (Q_element));
-#else
     
-//несколько тредов будут разбирать список, нужна блокировка. это конечно неахти
-#ifdef SPINLOCK 
-    pthread_spin_lock(&(Q->insert_lock));
-#endif    
-    
-    //есть а наличии следующий эллемент? берем текущий, а слежующий помечем хвостом
-    if(Q->return_tail->next){
-        ENTRY = Q->return_tail;
-        Q->return_tail = Q->return_tail->next;
-    }else{
-        ENTRY = aligned_alloc(sizeof(uintptr_t), sizeof (Q_element));
-#ifdef LOG_DEBUG        
-        fprintf(stderr,"RETURN Q EMPTY\n");
-#endif        
+    //add some to Q if it is empty
+    if(UNLIKELY(Q->return_tail->next == NULL)){
+        //lock after start is dangerous!!! 
+        Q->return_tail=alloc_Q_list_inside_page(Q->return_tail,-1);
+        //fprintf(stderr,"RETURN Q EMPTY\n");
     }
-#ifdef SPINLOCK     
-    pthread_spin_unlock(&(Q->insert_lock));
-#endif    
+    //not checking. Under lock it does not metter
+    //alloc_Q_list_inside_page does abort on problem with memory
+    ENTRY = Q->return_tail;
+    Q->return_tail = Q->return_tail->next;
     
-#endif        
+        
     
     assert_msg(ENTRY != NULL,"Got non valid Queue element pointer");
-    //memset(ENTRY,0,sizeof (Q_element));
     
     
     
-    
-    //errno = 0;
     va_start(arglist, format); //LAST PARAM!!!
     
     uintptr_t *p = ENTRY->params;
@@ -1481,17 +1648,11 @@ exit_parsing:
     
     Q_NEXT_FENCE;
     
-#ifdef SPINLOCK 
-    pthread_spin_lock(&(Q->insert_lock));
-#endif    
     
     Q->head->next=ENTRY;
     Q->head=ENTRY;
     Q->cnt_in+=1;
 
-#ifdef SPINLOCK 
-    pthread_spin_unlock(&(Q->insert_lock));
-#endif    
 
     
 }
@@ -1599,31 +1760,22 @@ void oroLogRelaxed_Q(Poro_t logFile, const char* format,  ...) {
     
     LOG_QUEUE *Q = &(LOG->QUEUE);
     
-#ifndef RETURN
-    ENTRY = aligned_alloc(sizeof(uintptr_t), sizeof (Q_element));
-#else
     
-//несколько тредов будут разбирать список, нужна блокировка. это конечно неахти
-#ifdef SPINLOCK 
-    pthread_spin_lock(&(Q->insert_lock));
-#endif    
+  
     
-    //есть а наличии следующий эллемент? берем текущий, а слежующий помечем хвостом
-    if(Q->return_tail->next){
-        ENTRY = Q->return_tail;
-        Q->return_tail = Q->return_tail->next;
-    }else{
-        ENTRY = aligned_alloc(sizeof(uintptr_t), sizeof (Q_element));
-#ifdef LOG_DEBUG        
-        fprintf(stderr,"RETURN Q EMPTY\n");
-#endif        
+    //add some to Q if it is empty
+    if(UNLIKELY(Q->return_tail->next == NULL)){
+        //lock after start is dangerous!!! 
+        Q->return_tail=alloc_Q_list_inside_page(Q->return_tail,-1);
+        //fprintf(stderr,"RETURN Q EMPTY\n");
     }
+    //not checking. Under lock it does not metter
+    //alloc_Q_list_inside_page does abort on problem with memory
+    ENTRY = Q->return_tail;
+    Q->return_tail = Q->return_tail->next;
     
-#ifdef SPINLOCK 
-    pthread_spin_unlock(&(Q->insert_lock));
-#endif    
     
-#endif        
+       
     
     assert_msg(ENTRY != NULL,"Got non valid Queue element pointer");
     memset(ENTRY,0,sizeof (Q_element));
@@ -1714,17 +1866,10 @@ exit_parsing:
     
     Q_NEXT_FENCE;
     
-#ifdef SPINLOCK 
-    pthread_spin_lock(&(Q->insert_lock));
-#endif   
-    
     Q->head->next=ENTRY;
     Q->head=ENTRY;
     Q->cnt_in+=1;
 
-#ifdef SPINLOCK     
-    pthread_spin_unlock(&(Q->insert_lock));
-#endif    
 
     
 }
@@ -1765,31 +1910,20 @@ void oroLogRelaxed_wojt(Poro_t logFile, const char* format,  ...) {
     
     LOG_QUEUE *Q = &(LOG->QUEUE);
     
-#ifndef RETURN
-    ENTRY = aligned_alloc(sizeof(uintptr_t), sizeof (Q_element));
-#else
     
-//несколько тредов будут разбирать список, нужна блокировка. это конечно неахти
-#ifdef SPINLOCK 
-    pthread_spin_lock(&(Q->insert_lock));
-#endif    
     
-    //есть а наличии следующий эллемент? берем текущий, а слежующий помечем хвостом
-    if(Q->return_tail->next){
-        ENTRY = Q->return_tail;
-        Q->return_tail = Q->return_tail->next;
-    }else{
-        ENTRY = aligned_alloc(sizeof(uintptr_t), sizeof (Q_element));
-#ifdef LOG_DEBUG        
-        fprintf(stderr,"RETURN Q EMPTY\n");
-#endif        
+    //add some to Q if it is empty
+    if(UNLIKELY(Q->return_tail->next == NULL)){
+        //lock after start is dangerous!!! 
+        Q->return_tail=alloc_Q_list_inside_page(Q->return_tail,-1);
+        //fprintf(stderr,"RETURN Q EMPTY\n");
     }
+    //not checking. Under lock it does not metter
+    //alloc_Q_list_inside_page does abort on problem with memory
+    ENTRY = Q->return_tail;
+    Q->return_tail = Q->return_tail->next;
     
-#ifdef SPINLOCK 
-    pthread_spin_unlock(&(Q->insert_lock));
-#endif    
-    
-#endif        
+       
     
     assert_msg(ENTRY != NULL,"Got non valid Queue element pointer");
     memset(ENTRY,0,sizeof (Q_element));
@@ -1873,18 +2007,10 @@ next:
     
     ENTRY->realtime = time;
     
-    
-#ifdef SPINLOCK 
-    pthread_spin_lock(&(Q->insert_lock));
-#endif    
-    
+       
     Q->head->next=ENTRY;
     Q->head=ENTRY;
     Q->cnt_in+=1;
-
-#ifdef SPINLOCK 
-    pthread_spin_unlock(&(Q->insert_lock));
-#endif    
 
     
 }
@@ -2114,21 +2240,20 @@ void oroLogFullObjFree(oroObj_t **Obj){
  * @param ...
  */
 void oroLogFull(Poro_t logFile, oroObj_t *obj, const char* format,  ...) {
+
+    struct timespec time={0};
+    if(time_source>=0)
+        clock_gettime(time_source,&time);
     
-    assert(logFile!=0);
+    __builtin_prefetch((struct FD_LIST_ITEM *)logFile);
     struct FD_LIST_ITEM *LOG=(struct FD_LIST_ITEM *)logFile;
     
-    Q_element *ENTRY;
-    LOG_QUEUE *Q;
+    
     
     va_list arglist;
     
 
-        struct timespec time={0};
-    
-    
-    if(time_source>=0)
-        clock_gettime(time_source,&time);
+        
 
 
     if(UNLIKELY(LOG->insert_forbidden == 1)){
@@ -2147,34 +2272,28 @@ void oroLogFull(Poro_t logFile, oroObj_t *obj, const char* format,  ...) {
         obj->n = logLogFullObjBufLen;
         //fprintf(stderr,"temp_format alloc\n");
     }
+    
+    
+    Q_element *ENTRY;
+    LOG_QUEUE *Q;
     Q = &(LOG->QUEUE);
 
     
-#ifndef RETURN
-    ENTRY = aligned_alloc(sizeof(uintptr_t), sizeof (Q_element));
-#else
     
-//несколько тредов будут разбирать список, нужна блокировка. это конечно неахти
-#ifdef SPINLOCK 
-    pthread_spin_lock(&(Q->insert_lock));
-#endif    
     
-    //есть а наличии следующий эллемент? берем текущий, а слежующий помечем хвостом
-    if(Q->return_tail->next){
-        ENTRY = Q->return_tail;
-        Q->return_tail = Q->return_tail->next;
-    }else{
-        ENTRY = aligned_alloc(sizeof(uintptr_t), sizeof (Q_element));
-#ifdef LOG_DEBUG        
-        fprintf(stderr,"RETURN Q EMPTY\n");
-#endif        
+    //add some to Q if it is empty
+    if(UNLIKELY(Q->return_tail->next == NULL)){
+        //lock after start is dangerous!!! 
+        Q->return_tail=alloc_Q_list_inside_page(Q->return_tail,-1);
+        //fprintf(stderr,"RETURN Q EMPTY\n");
     }
+    //not checking. Under lock it does not metter
+    //alloc_Q_list_inside_page does abort on problem with memory
+    ENTRY = Q->return_tail;
+    Q->return_tail = Q->return_tail->next;
     
-#ifdef SPINLOCK 
-    pthread_spin_unlock(&(Q->insert_lock));
-#endif    
     
-#endif        
+      
     
     assert_msg(ENTRY != NULL,"Got non valid Queue element pointer");
     memset(ENTRY,0,sizeof (Q_element));
@@ -2223,20 +2342,11 @@ void oroLogFull(Poro_t logFile, oroObj_t *obj, const char* format,  ...) {
     
     Q_NEXT_FENCE;
     
-    //if(1)
-    //    ENTRY->tid = pthread_self();
-    
-#ifdef SPINLOCK 
-    pthread_spin_lock(&(Q->insert_lock));
-#endif    
     
     Q->head->next=ENTRY;
     Q->head=ENTRY;
     Q->cnt_in+=1;
 
-#ifdef SPINLOCK 
-    pthread_spin_unlock(&(Q->insert_lock));
-#endif    
 
     
 }
@@ -2251,59 +2361,44 @@ void oroLogFull(Poro_t logFile, oroObj_t *obj, const char* format,  ...) {
  */
 size_t oroLogFulla(Poro_t logFile, size_t expecting_byte, const char* format,  ...){
     
-    assert(logFile!=0);
-    struct FD_LIST_ITEM *LOG=(struct FD_LIST_ITEM *)logFile;
-    
-    Q_element *ENTRY;
-    LOG_QUEUE *Q;
-    
-    va_list arglist;
-    
-
-        struct timespec time={0};
-    
-    
+    struct timespec time={0};
     if(time_source>=0)
         clock_gettime(time_source,&time);
-
+    
+    __builtin_prefetch((struct FD_LIST_ITEM *)logFile);
+    struct FD_LIST_ITEM *LOG=(struct FD_LIST_ITEM *)logFile;
+    
+    
+    
+    va_list arglist;
 
     if(UNLIKELY(LOG->insert_forbidden == 1)){
-        
         va_start(arglist, format);
         logRedirect_stderr(logFile,__func__,time,format,arglist);
         va_end(arglist);
-        
         return expecting_byte;
     }
     
-    
+    Q_element *ENTRY;
+    LOG_QUEUE *Q;
     Q = &(LOG->QUEUE);
 
     
-#ifndef RETURN
-    ENTRY = aligned_alloc(sizeof(uintptr_t), sizeof (Q_element));
-#else
     
-//несколько тредов будут разбирать список, нужна блокировка. это конечно неахти
-#ifdef SPINLOCK 
-    pthread_spin_lock(&(Q->insert_lock));
-#endif    
     
-    //есть а наличии следующий эллемент? берем текущий, а слежующий помечем хвостом
-    if(Q->return_tail->next){
-        ENTRY = Q->return_tail;
-        Q->return_tail = Q->return_tail->next;
-    }else{
-        ENTRY = aligned_alloc(sizeof(uintptr_t), sizeof (Q_element));
-#ifdef LOG_DEBUG        
-        fprintf(stderr,"RETURN Q EMPTY\n");
-#endif        
+    //add some to Q if it is empty
+    if(UNLIKELY(Q->return_tail->next == NULL)){
+        //lock after start is dangerous!!! 
+        Q->return_tail=alloc_Q_list_inside_page(Q->return_tail,-1);
+        //fprintf(stderr,"RETURN Q EMPTY\n");
     }
-#ifdef SPINLOCK     
-     pthread_spin_unlock(&(Q->insert_lock));
-#endif     
+    //not checking. Under lock it does not metter
+    //alloc_Q_list_inside_page does abort on problem with memory
+    ENTRY = Q->return_tail;
+    Q->return_tail = Q->return_tail->next;
+
     
-#endif        
+      
     
     assert_msg(ENTRY != NULL,"Got non valid Queue element pointer");
     //memset(ENTRY,0,sizeof (Q_element));
@@ -2348,17 +2443,10 @@ size_t oroLogFulla(Poro_t logFile, size_t expecting_byte, const char* format,  .
     
     
     
-#ifdef SPINLOCK 
-    pthread_spin_lock(&(Q->insert_lock));
-#endif    
-    
     Q->head->next=ENTRY;
     Q->head=ENTRY;
     Q->cnt_in+=1;
 
-#ifdef SPINLOCK 
-    pthread_spin_unlock(&(Q->insert_lock));
-#endif    
 
     return expecting_byte;
 }

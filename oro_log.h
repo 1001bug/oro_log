@@ -57,6 +57,8 @@ extern "C" {
         int timestamp_utc;
 
         size_t bufsize; //setvbuf
+        int nospinlock; //1 - log file without locks (one thread print only)
+        int do_mlock;  //mlock always? if 1 - exit on mlock fail
 
 
     } oro_attrs_t;
@@ -68,7 +70,7 @@ extern "C" {
 
 
 
-
+    void oroLogFixed5_unlocked(Poro_t logFile, const char* format, uintptr_t p1, uintptr_t p2, uintptr_t p3, uintptr_t p4, uintptr_t p5);
 
     void oroLogFixed(Poro_t logFile, size_t NUM, const char* format, ...);
     void oroLogRelaxed(Poro_t logFile, const char* format, ...);

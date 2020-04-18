@@ -40,7 +40,7 @@
 
 #define LOG_HEADER ""
 //#define LOG_HEADER "%02i:%02i:%02i.%09li|%li%09li;"
-#define NN 1000000
+#define NN 100000
 /*
  * 
  */
@@ -190,6 +190,12 @@ int main(int argc, char** argv) {
     
     config.return_q=NN;
     
+        
+    config.nospinlock=1;
+    
+    config.do_mlock=1;
+    
+    
     LOG = oroLogOpen(config,on_error_stderr);
     
     
@@ -210,9 +216,9 @@ int main(int argc, char** argv) {
 
 
     
-    LOG2 = oroLogOpen(config,on_error_stderr);
+    //LOG2 = oroLogOpen(config,on_error_stderr);
     
-    assert(LOG2);
+    //assert(LOG2);
     
     
     
@@ -285,6 +291,42 @@ int main(int argc, char** argv) {
     O.n = 2048;*/
     
     sleep(1);
+    
+    
+    char *some_str = "sdfhisuhijfolshfogsh";
+    for(int REP=0;REP<1;REP++){
+        
+    
+    
+    for (int r = 0; r < NN; r++) {
+        
+        MFENCE;
+        RDTSCP(start);
+        oroLogFixed5_unlocked(LOG, "oroLogFixedA CLOCK_ID_MEASURE   entry str='%s' %u with TIME=%li%09li anf current sec number %li an more over and so on"
+        //oroLogFixedA(LOG, "oroLogFixedA CLOCK_ID_MEASURE   entry str='%s' %u with TIME=%li%09li anf current sec number %li an more over and so on"
+                ,(uintptr_t)some_str
+                ,NN
+                ,51684684513UL
+                ,575755522827UL
+                ,55<<10
+                );
+        MFENCE;
+        RDTSCP(rdtscp_E[r]);rdtscp_S[r]=start;
+    }
+    
+    
+    sleep(1);
+    }
+    
+    goto end;
+    for (int r = 0; r < NN; r++){//(tmp * 1000L) / cycles_in_one_usec
+        printf("%li\n",   ((rdtscp_E[r]-rdtscp_S[r])* 1000L) / cycles_in_one_usec            );
+    }
+    
+    goto end;
+    
+    
+    
     /*char *dummy = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 
     struct timespec nanosl={0,500};

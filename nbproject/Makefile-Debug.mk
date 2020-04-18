@@ -40,7 +40,7 @@ OBJECTFILES= \
 
 
 # C Compiler Flags
-CFLAGS=-m64 -O2 -mavx
+CFLAGS=-m64 -O0 -mavx
 
 # CC Compiler Flags
 CCFLAGS=
