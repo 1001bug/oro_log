@@ -40,7 +40,7 @@
 
 #define LOG_HEADER ""
 //#define LOG_HEADER "%02i:%02i:%02i.%09li|%li%09li;"
-#define NN 100000
+#define NN 10000
 /*
  * 
  */
@@ -193,7 +193,7 @@ int main(int argc, char** argv) {
         
     config.nospinlock=1;
     
-    config.do_mlock=1;
+    config.do_mlock=-1;
     
     
     LOG = oroLogOpen(config,on_error_stderr);
@@ -278,97 +278,18 @@ int main(int argc, char** argv) {
 
 
 
-    oroObj_t *Obj __attribute__ ((aligned(sizeof(uintptr_t))));
-    
-    Obj = oroLogFullObj(0);
-    
-    
-    
-    /*memset(&O,0,sizeof(logObj));
-    
-    O.buf = aligned_alloc(sizeof(uintptr_t), 2048);
-    assert(O.buf);
-    O.n = 2048;*/
-    
-    sleep(1);
-    
-    
-    char *some_str = "sdfhisuhijfolshfogsh";
-    for(int REP=0;REP<1;REP++){
-        
-    
-    
-    for (int r = 0; r < NN; r++) {
-        
-        MFENCE;
-        RDTSCP(start);
-        oroLogFixed5_unlocked(LOG, "oroLogFixedA CLOCK_ID_MEASURE   entry str='%s' %u with TIME=%li%09li anf current sec number %li an more over and so on"
-        //oroLogFixedA(LOG, "oroLogFixedA CLOCK_ID_MEASURE   entry str='%s' %u with TIME=%li%09li anf current sec number %li an more over and so on"
-                ,(uintptr_t)some_str
-                ,NN
-                ,51684684513UL
-                ,575755522827UL
-                ,55<<10
-                );
-        MFENCE;
-        RDTSCP(rdtscp_E[r]);rdtscp_S[r]=start;
-    }
-    
-    
-    sleep(1);
-    }
-    
-    goto end;
-    for (int r = 0; r < NN; r++){//(tmp * 1000L) / cycles_in_one_usec
-        printf("%li\n",   ((rdtscp_E[r]-rdtscp_S[r])* 1000L) / cycles_in_one_usec            );
-    }
-    
-    goto end;
-    
-    
-    
-    /*char *dummy = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 
-    struct timespec nanosl={0,500};
-    uint64_t s,e,c=8000000;
-    RDTSCP(s);
-    for (int r = 0; r < c; r++) {
-        
-        logLogFixedA(LOG2, "1ogLogFixed   entry str='%s' %u with TIME=%li%09li anf current sec number %li an more over and so on %llu:%llu"
-                ,__ASSERT_FUNCTION
-                ,NN
-                ,cur.tv_sec
-                ,cur.tv_nsec
-                ,55<<10
-                ,s,cycles_in_one_usec
-                );
-        //usleep(1);
-        //nanosleep(&nanosl,NULL);
-      nanosl.tv_sec+=strlen(dummy);      nanosl.tv_sec+=strlen(dummy);      nanosl.tv_sec+=strlen(dummy);      nanosl.tv_sec+=strlen(dummy);      nanosl.tv_sec+=strlen(dummy);      nanosl.tv_sec+=strlen(dummy);      nanosl.tv_sec+=strlen(dummy);               nanosl.tv_sec+=strlen(dummy);      nanosl.tv_sec+=strlen(dummy);      nanosl.tv_sec+=strlen(dummy);      nanosl.tv_sec+=strlen(dummy);      nanosl.tv_sec+=strlen(dummy);      nanosl.tv_sec+=strlen(dummy);      nanosl.tv_sec+=strlen(dummy); nanosl.tv_sec+=strlen(dummy);      nanosl.tv_sec+=strlen(dummy);      nanosl.tv_sec+=strlen(dummy);      nanosl.tv_sec+=strlen(dummy);      nanosl.tv_sec+=strlen(dummy);      nanosl.tv_sec+=strlen(dummy);      nanosl.tv_sec+=strlen(dummy);               nanosl.tv_sec+=strlen(dummy);      nanosl.tv_sec+=strlen(dummy);      nanosl.tv_sec+=strlen(dummy);      nanosl.tv_sec+=strlen(dummy);      nanosl.tv_sec+=strlen(dummy);      nanosl.tv_sec+=strlen(dummy);      nanosl.tv_sec+=strlen(dummy);
-      nanosl.tv_sec+=strlen(dummy);      nanosl.tv_sec+=strlen(dummy);      nanosl.tv_sec+=strlen(dummy);      nanosl.tv_sec+=strlen(dummy);      nanosl.tv_sec+=strlen(dummy);      nanosl.tv_sec+=strlen(dummy);      nanosl.tv_sec+=strlen(dummy);               nanosl.tv_sec+=strlen(dummy);      nanosl.tv_sec+=strlen(dummy);      nanosl.tv_sec+=strlen(dummy);      nanosl.tv_sec+=strlen(dummy);      nanosl.tv_sec+=strlen(dummy);      nanosl.tv_sec+=strlen(dummy);      nanosl.tv_sec+=strlen(dummy); nanosl.tv_sec+=strlen(dummy);      nanosl.tv_sec+=strlen(dummy);      nanosl.tv_sec+=strlen(dummy);      nanosl.tv_sec+=strlen(dummy);      nanosl.tv_sec+=strlen(dummy);      nanosl.tv_sec+=strlen(dummy);      nanosl.tv_sec+=strlen(dummy);               nanosl.tv_sec+=strlen(dummy);      nanosl.tv_sec+=strlen(dummy);      nanosl.tv_sec+=strlen(dummy);      nanosl.tv_sec+=strlen(dummy);      nanosl.tv_sec+=strlen(dummy);      nanosl.tv_sec+=strlen(dummy);      nanosl.tv_sec+=strlen(dummy);
-      nanosl.tv_sec+=strlen(dummy);      nanosl.tv_sec+=strlen(dummy);      nanosl.tv_sec+=strlen(dummy);      nanosl.tv_sec+=strlen(dummy);      nanosl.tv_sec+=strlen(dummy);      nanosl.tv_sec+=strlen(dummy);      nanosl.tv_sec+=strlen(dummy);               nanosl.tv_sec+=strlen(dummy);      nanosl.tv_sec+=strlen(dummy);      nanosl.tv_sec+=strlen(dummy);      nanosl.tv_sec+=strlen(dummy);      nanosl.tv_sec+=strlen(dummy);      nanosl.tv_sec+=strlen(dummy);      nanosl.tv_sec+=strlen(dummy); nanosl.tv_sec+=strlen(dummy);      nanosl.tv_sec+=strlen(dummy);      nanosl.tv_sec+=strlen(dummy);      nanosl.tv_sec+=strlen(dummy);      nanosl.tv_sec+=strlen(dummy);      nanosl.tv_sec+=strlen(dummy);      nanosl.tv_sec+=strlen(dummy);               nanosl.tv_sec+=strlen(dummy);      nanosl.tv_sec+=strlen(dummy);      nanosl.tv_sec+=strlen(dummy);      nanosl.tv_sec+=strlen(dummy);      nanosl.tv_sec+=strlen(dummy);      nanosl.tv_sec+=strlen(dummy);      nanosl.tv_sec+=strlen(dummy);
-      nanosl.tv_sec+=strlen(dummy);      nanosl.tv_sec+=strlen(dummy);      nanosl.tv_sec+=strlen(dummy);      nanosl.tv_sec+=strlen(dummy);      nanosl.tv_sec+=strlen(dummy);      nanosl.tv_sec+=strlen(dummy);      nanosl.tv_sec+=strlen(dummy);               nanosl.tv_sec+=strlen(dummy);      nanosl.tv_sec+=strlen(dummy);      nanosl.tv_sec+=strlen(dummy);      nanosl.tv_sec+=strlen(dummy);      nanosl.tv_sec+=strlen(dummy);      nanosl.tv_sec+=strlen(dummy);      nanosl.tv_sec+=strlen(dummy); nanosl.tv_sec+=strlen(dummy);      nanosl.tv_sec+=strlen(dummy);      nanosl.tv_sec+=strlen(dummy);      nanosl.tv_sec+=strlen(dummy);      nanosl.tv_sec+=strlen(dummy);      nanosl.tv_sec+=strlen(dummy);      nanosl.tv_sec+=strlen(dummy);               nanosl.tv_sec+=strlen(dummy);      nanosl.tv_sec+=strlen(dummy);      nanosl.tv_sec+=strlen(dummy);      nanosl.tv_sec+=strlen(dummy);      nanosl.tv_sec+=strlen(dummy);      nanosl.tv_sec+=strlen(dummy);      nanosl.tv_sec+=strlen(dummy);
-      nanosl.tv_sec+=strlen(dummy);      nanosl.tv_sec+=strlen(dummy);      nanosl.tv_sec+=strlen(dummy);      nanosl.tv_sec+=strlen(dummy);      nanosl.tv_sec+=strlen(dummy);      nanosl.tv_sec+=strlen(dummy);      nanosl.tv_sec+=strlen(dummy);               nanosl.tv_sec+=strlen(dummy);      nanosl.tv_sec+=strlen(dummy);      nanosl.tv_sec+=strlen(dummy);      nanosl.tv_sec+=strlen(dummy);      nanosl.tv_sec+=strlen(dummy);      nanosl.tv_sec+=strlen(dummy);      nanosl.tv_sec+=strlen(dummy); nanosl.tv_sec+=strlen(dummy);      nanosl.tv_sec+=strlen(dummy);      nanosl.tv_sec+=strlen(dummy);      nanosl.tv_sec+=strlen(dummy);      nanosl.tv_sec+=strlen(dummy);      nanosl.tv_sec+=strlen(dummy);      nanosl.tv_sec+=strlen(dummy);               nanosl.tv_sec+=strlen(dummy);      nanosl.tv_sec+=strlen(dummy);      nanosl.tv_sec+=strlen(dummy);      nanosl.tv_sec+=strlen(dummy);      nanosl.tv_sec+=strlen(dummy);      nanosl.tv_sec+=strlen(dummy);      nanosl.tv_sec+=strlen(dummy);
-      
-      
-        
-        
-      
-        
-        
-    }
-    RDTSCP(e);
     
-    printf("Write %lu to LOG2: %lu nano, %lu for every write [%li]\n\n",c,((e-s)* 1000L)/cycles_in_one_usec,(((e-s)* 1000L)/cycles_in_one_usec)/c,nanosl.tv_sec);
-    sleep(1);*/
+    sleep(1);
     
-    //(tmp * 1000L) / cycles_in_one_usec
+    
+    
     
     
     oroLogFixedA(LOG, "logLogFixed WRONG   entry str='%s' %u with TIME=%li%09li anf current sec number %l ................... " ,">str<",1,2,3,4);
-    oroLogRelaxed(LOG, "oroLogRelaxed WRONG  entry str='%s' %u with TIME=%li%09li anf current sec number %l................. " ,">str<",1,2,3,4);
-    oroLogRelaxed_Q(LOG, "oroLogRelaxed WRONG  entry str='%s' %u with TIME=%li%09li anf current sec number %l ................ " ,">str<",1,2,3,4);
-    
+    oroLogRelaxedA(LOG, "oroLogRelaxed WRONG  entry str='%s' %u with TIME=%li%09li anf current sec number %l................. " ,">str<",1,2,3);
+    oroLogRelaxed_XA(LOG, "oroLogRelaxed WRONG  entry str='%s' %u with TIME=%li%09li anf current sec number %l................. " ,">str<",1,2,3);
+    oroLogFull(LOG, 25, "oroLogRelaxed WRONG  entry str='%s' %u with TIME=%li%09li anf current sec number %l ................ " ,">str<",1,2,3,4);
     
     
 //    logLogFixedA(LOG, "1ogLogFixed   entry str='s' u with TIME=li09li anf current sec number li an more over and so on llu:llu");
@@ -414,8 +335,53 @@ int main(int argc, char** argv) {
     printf("\n\n\n");
     
     
+
+    printf("test val 8 zero padd: >%08i<, "
+            "test val 8 space padd: >%8i<, "
+            "test var 10 var zero padd: %0*i, "
+            "fin val 66: >%i<\n"
+            ,12
+            ,13
+            ,10, 14,
+            66
+            );
+    
+    
+    oroLogFixedA(LOG,
+            "oroLogFixedA:    test val 8 zero padd: >%08i<, "
+            "test val 8 space padd: >%8i<, "
+            "test var 10 var zero padd: %0*i, "
+            "fin val 66: >%i<\n"
+            ,12
+            ,13
+            ,10, 14,
+            66
+            );
+    oroLogRelaxedA(LOG,
+            "oroLogRelaxed:   test val 8 zero padd: >%08i<, "
+            "test val 8 space padd: >%8i<, "
+            "test var 10 var zero padd: %0*i, "
+            "fin val 66: >%i<\n"
+            ,12
+            ,13
+            ,10, 14,
+            66
+            );
+    oroLogRelaxed_XA(LOG,
+            "oroLogRelaxed_X: test val 8 zero padd: >%08i<, "
+            "test val 8 space padd: >%8i<, "
+            "test var 10 var zero padd: %0*i, "
+            "fin val 66: >%i<\n"
+            ,12
+            ,13
+            ,10, 14,
+            66
+            );
+    
     
             
+    //goto end;
+    
     for (int r = 0; r < NN; r++) {
         clock_gettime(CLOCK_ID_MEASURE,&cur);
         
@@ -446,17 +412,18 @@ int main(int argc, char** argv) {
     
     for (int r = 0; r < NN; r++) {
         RDTSCP(start);
-        oroLogFixedA(LOG, "1ogLogFixed   entry str='%s' %u with TIME=%li%09li anf current sec number %li an more over and so on %llu:%llu"
-                ,__ASSERT_FUNCTION
-                ,NN
-                ,cur.tv_sec
-                ,cur.tv_nsec
-                ,55<<10
-                ,start,cycles_in_one_usec
+        oroLogFixed5_unlocked(LOG, "oroLogFixed5_unlocked   entry str='%s' %u with TIME=%li%09li anf current sec number %li an more over and so on llu:llu"
+                ,(uintptr_t)__ASSERT_FUNCTION
+                ,(uintptr_t)NN
+                ,(uintptr_t)cur.tv_sec
+                ,(uintptr_t)cur.tv_nsec
+                ,(uintptr_t)55<<10
+                //,start,cycles_in_one_usec
                 );
         RDTSCP(rdtscp_E[r]);rdtscp_S[r]=start;
+        
     }
-    PRINT_STAT("logLogFixed 1", rdtscp_S, rdtscp_E, rdtscp_dif, NN, CYCLES);
+    PRINT_STAT("oroLogFixed5_unlocked ", rdtscp_S, rdtscp_E, rdtscp_dif, NN, CYCLES);
     sleep(1);
     
     
@@ -464,7 +431,23 @@ int main(int argc, char** argv) {
     
     for (int r = 0; r < NN; r++) {
         RDTSCP(start);
-        oroLogFixed(LOG2,7, "2ogLogFixed   entry str='%s' %u with TIME=%li%09li anf current sec number %li an more over and so on %llu:%llu"
+        oroLogFixed(LOG,7, "2ogLogFixed   entry str='%s' %u with TIME=%li%09li anf current sec number %li an more over and so on %llu:%llu"
+                ,static_string_ptr
+                ,NN
+                ,cur.tv_sec
+                ,cur.tv_nsec
+                ,55<<10
+                ,start,cycles_in_one_usec
+                );
+        RDTSCP(rdtscp_E[r]);rdtscp_S[r]=start;
+        
+    }
+    PRINT_STAT("logLogFixed ", rdtscp_S, rdtscp_E, rdtscp_dif, NN, CYCLES);
+    sleep(1);
+    
+    for (int r = 0; r < NN; r++) {
+        RDTSCP(start);
+        oroLogFixedA(LOG,"3ogLogFixed   entry str='%s' %u with TIME=%li%09li anf current sec number %li an more over and so on %llu:%llu"
                 ,static_string_ptr
                 ,NN
                 ,cur.tv_sec
@@ -474,27 +457,12 @@ int main(int argc, char** argv) {
                 );
         RDTSCP(rdtscp_E[r]);rdtscp_S[r]=start;
     }
-    PRINT_STAT("logLogFixed 2", rdtscp_S, rdtscp_E, rdtscp_dif, NN, CYCLES);
+    PRINT_STAT("logLogFixed AAA 3", rdtscp_S, rdtscp_E, rdtscp_dif, NN, CYCLES);
     sleep(1);
     
     for (int r = 0; r < NN; r++) {
         RDTSCP(start);
-        oroLogFixed(LOG,7, "3ogLogFixed   entry str='%s' %u with TIME=%li%09li anf current sec number %li an more over and so on %llu:%llu"
-                ,static_string_ptr
-                ,NN
-                ,cur.tv_sec
-                ,cur.tv_nsec
-                ,55<<10
-                ,start,cycles_in_one_usec
-                );
-        RDTSCP(rdtscp_E[r]);rdtscp_S[r]=start;
-    }
-    PRINT_STAT("logLogFixed 3", rdtscp_S, rdtscp_E, rdtscp_dif, NN, CYCLES);
-    sleep(1);
-    
-    for (int r = 0; r < NN; r++) {
-        RDTSCP(start);
-        oroLogFixed(LOG2,7, "4ogLogFixed   entry str='%s' %u with TIME=%li%09li anf current sec number %li an more over and so on %llu:%llu"
+        oroLogFixed(LOG,7, "4ogLogFixed   entry str='%s' %u with TIME=%li%09li anf current sec number %li an more over and so on %llu:%llu"
                 ,static_string_ptr
                 ,NN
                 ,cur.tv_sec
@@ -509,6 +477,11 @@ int main(int argc, char** argv) {
     
     for (int r = 0; r < NN; r++) {
         RDTSCP(start);
+        _Static_assert(COUNT_1_TO_256_ARGS(,static_string_ptr
+                ,NN
+                ,NN,NN
+                ,55<<10
+                ,31337,cycles_in_one_usec)<18,"blablabla");
         oroLogFixed(LOG,7, "5ogLogFixed   entry str='%s' %u with TIME=%li%09li anf current sec number %li an more over and so on %llu:%llu"
                 ,static_string_ptr
                 ,NN
@@ -520,14 +493,17 @@ int main(int argc, char** argv) {
                 );
         RDTSCP(rdtscp_E[r]);rdtscp_S[r]=start;
     }
-    PRINT_STAT("logLogFixed 5", rdtscp_S, rdtscp_E, rdtscp_dif, NN, CYCLES);
+    PRINT_STAT("logLogFixed STAATIC ASSERT 5", rdtscp_S, rdtscp_E, rdtscp_dif, NN, CYCLES);
     sleep(1);
+    
+    
+    
     
   // goto end; /////////////////////////////////////////// STOP HERE ////////////////////////////////////////////
 
     for (int r = 0; r < NN; r++) {
         RDTSCP(start);
-        oroLogRelaxed(LOG,"logLogRelaxed entry str='%p' %u with TIME=%li%09li anf current sec number %li an more over and so on %llu:%llu"
+        oroLogRelaxedA(LOG,"logLogRelaxed entry str='%p' %u with TIME=%li%09li anf current sec number %li an more over and so on %llu:%llu"
                 ,static_string_ptr
                 ,NN
                 ,cur.tv_sec
@@ -542,7 +518,7 @@ int main(int argc, char** argv) {
     
     for (int r = 0; r < NN; r++) {
         RDTSCP(start);
-        oroLogRelaxed(LOG,"logLogRelaxed entry str='%p' %u with TIME=%li%09li anf current sec number %li an more over and so on %llu:%llu"
+        oroLogRelaxedA(LOG,"logLogRelaxed entry str='%p' %u with TIME=%li%09li anf current sec number %li an more over and so on %llu:%llu"
                 ,static_string_ptr
                 ,NN
                 ,cur.tv_sec
@@ -555,9 +531,10 @@ int main(int argc, char** argv) {
     PRINT_STAT("logLogRelaxed Cheat", rdtscp_S, rdtscp_E, rdtscp_dif, NN, CYCLES);
     sleep(1);
     
+    
     for (int r = 0; r < NN; r++) {
         RDTSCP(start);
-        oroLogRelaxed_Q(LOG,"logLogRelaxed_Q entry str='%p' %u with TIME=%li%09li anf current sec number %li an more over and so on %llu:%llu"
+        oroLogRelaxed_XA(LOG,"logLogRelaxed XXX entry str='%p' %u with TIME=%li%09li anf current sec number %li an more over and so on %llu:%llu"
                 ,static_string_ptr
                 ,NN
                 ,cur.tv_sec
@@ -567,13 +544,12 @@ int main(int argc, char** argv) {
                 );
         RDTSCP(rdtscp_E[r]);rdtscp_S[r]=start;
     }
-    PRINT_STAT("logLogRelaxed_Q Cheat", rdtscp_S, rdtscp_E, rdtscp_dif, NN, CYCLES);
+    PRINT_STAT("logLogRelaxed XXX Cheat", rdtscp_S, rdtscp_E, rdtscp_dif, NN, CYCLES);
     sleep(1);
-    
     
     for (int r = 0; r < NN; r++) {
         RDTSCP(start);
-        oroLogRelaxed_Q(LOG,"logLogRelaxed_Q entry str='%p' %u with TIME=%li%09li anf current sec number %li an more over and so on %llu:%llu"
+        oroLogRelaxed_XA(LOG,"logLogRelaxed XXX entry str='%p' %u with TIME=%li%09li anf current sec number %li an more over and so on %llu:%llu"
                 ,static_string_ptr
                 ,NN
                 ,cur.tv_sec
@@ -583,16 +559,16 @@ int main(int argc, char** argv) {
                 );
         RDTSCP(rdtscp_E[r]);rdtscp_S[r]=start;
     }
-    PRINT_STAT("logLogRelaxed_Q Cheat", rdtscp_S, rdtscp_E, rdtscp_dif, NN, CYCLES);
+    PRINT_STAT("logLogRelaxed XXX Cheat", rdtscp_S, rdtscp_E, rdtscp_dif, NN, CYCLES);
     sleep(1);
     
-   
+
     
     
     
     for (int r = 0; r < NN; r++) {
         RDTSCP(start);
-        oroLogRelaxed(LOG,"logLogRelaxed entry str='%s' %u with TIME=%li%09li anf current sec number %li an more over and so on %llu:%llu"
+        oroLogRelaxedA(LOG,"logLogRelaxed entry str='%s' %u with TIME=%li%09li anf current sec number %li an more over and so on %llu:%llu"
                 ,static_string_ptr
                 ,NN
                 ,cur.tv_sec
@@ -604,57 +580,12 @@ int main(int argc, char** argv) {
     }
     PRINT_STAT("logLogRelaxed", rdtscp_S, rdtscp_E, rdtscp_dif, NN, CYCLES);
     sleep(1);
+
     
-    
-    
-/*    for (int r = 0; r < NN; r++) {
-        RDTSCP(start);
-        logLogFull(LOG, "logLogFull    entry str='%s' %u with TIME=%li%09li anf current sec number %li an more over and so on %llu:%llu"
-                ,static_string_ptr
-                ,NN
-                ,cur.tv_sec
-                ,cur.tv_nsec
-                ,55<<10
-                ,start,cycles_in_one_usec
-                );
-        RDTSCP(rdtscp_E[r]);rdtscp_S[r]=start;
-    }
-    PRINT_STAT("logLogFull", rdtscp_S, rdtscp_E, rdtscp_dif, NN, CYCLES);
-    sleep(1);
-*/
     
     for (int r = 0; r < NN; r++) {
         RDTSCP(start);
-        oroLogFull(LOG, Obj, "logLogFull    entry str='%s' %u with TIME=%li%09li anf current sec number %li an more over and so on %llu:%llu"
-                ,static_string_ptr
-                ,NN
-                ,cur.tv_sec
-                ,cur.tv_nsec
-                ,55L<<10L
-                ,start,cycles_in_one_usec
-                );
-        RDTSCP(rdtscp_E[r]);rdtscp_S[r]=start;
-    }
-    PRINT_STAT("logLogFull", rdtscp_S, rdtscp_E, rdtscp_dif, NN, CYCLES);
-    sleep(1);
-    for (int r = 0; r < NN; r++) {
-        RDTSCP(start);
-        oroLogFull(LOG, Obj, "logLogFull    entry str='%s' %u with TIME=%li%09li anf current sec number %li an more over and so on %llu:%llu"
-                ,static_string_ptr
-                ,NN
-                ,cur.tv_sec
-                ,cur.tv_nsec
-                ,55L<<10L
-                ,start,cycles_in_one_usec
-                );
-        RDTSCP(rdtscp_E[r]);rdtscp_S[r]=start;
-    }
-    PRINT_STAT("logLogFull", rdtscp_S, rdtscp_E, rdtscp_dif, NN, CYCLES);
-    sleep(1);
-    
-    for (int r = 0; r < NN; r++) {
-        RDTSCP(start);
-        oroLogFulla(LOG, 256, "logLogFulla    entry str='%s' %u with TIME=%li%09li anf current sec number %li an more over and so on %llu:%llu"
+        oroLogFull(LOG, 256, "logLogFulla    entry str='%s' %u with TIME=%li%09li anf current sec number %li an more over and so on %llu:%llu"
                 ,static_string_ptr
                 ,NN
                 ,cur.tv_sec
@@ -669,7 +600,7 @@ int main(int argc, char** argv) {
     
     for (int r = 0; r < NN; r++) {
         RDTSCP(start);
-        oroLogFulla(LOG, 256, "logLogFulla    entry str='%s' %u with TIME=%li%09li anf current sec number %li an more over and so on %llu:%llu"
+        oroLogFull(LOG, 256, "logLogFulla    entry str='%s' %u with TIME=%li%09li anf current sec number %li an more over and so on %llu:%llu"
                 ,static_string_ptr
                 ,NN
                 ,cur.tv_sec
@@ -703,7 +634,7 @@ int main(int argc, char** argv) {
 
 
 
-    for (int r = 0; r < NN; r++) {
+    /*for (int r = 0; r < NN; r++) {
         RDTSCP(start);
         oroLogRelaxedDummy(LOG,"logLogRelaxedDummy entry str='%p' %u with TIME=%li%09li anf current sec number %li an more over and so on"
                 ,static_string_ptr
@@ -729,7 +660,7 @@ int main(int argc, char** argv) {
         RDTSCP(rdtscp_E[r]);rdtscp_S[r]=start;
     }
     PRINT_STAT("logLogRelaxedDummy wo jt", rdtscp_S, rdtscp_E, rdtscp_dif, NN, CYCLES);
-    sleep(1);
+    sleep(1);*/
     
 
 /*
@@ -746,7 +677,7 @@ end:
     
 //    free(O.buf);
     
-    oroLogFullObjFree(&Obj);
+
 
 
 

@@ -12,15 +12,42 @@
 /*
  * добавление логов после старта oroWriter
  * _unlocked versions
- * remove oroObj anf oroLogFull, use oroLogFulla instead
- * remove errno on critical path
- * remove memset where not realy needed
- * mlock and populate all Qs
- * Relaxed - table with goto insteadof numbers
- * remove all testing functions
- * finaly! replace Full whis Fulla
+ * -------------------------remove oroObj anf oroLogFull, use oroLogFulla instead
+ * -------------------------remove errno on critical path
+ * -------------------------remove memset where not realy needed
+ * -------------------------mlock and populate all Qs
+ * -------------------------Relaxed_X - table with goto insteadof numbers
+ * -------------------------remove all testing functions
+ * -------------------------finaly! replace Full whis Fulla
+ * вставить атрибут оптимизации типа int foo(int i) __attribute__((optimize("-O2")));
+ * не проверять укзатель на logFile так же как fprintf не проверяет FILE на NULL
+ * -------------------------добавить NUM в Relaxed
+ * LogFlush seep inerval через ENV? или парметры config или start_log_flush, но как-то хочется задать
  * 
- * some placese marked with `STDERR OUTPUT !!!!`
+ * более эллегантно синхронный старт log_writer
+ * 
+ * switch вметсо for в Fixed
+ * 
+ * проверить наличие spinlock во всех функциях log*
+ * 
+ * oroLogTruncate отдельно для каждого файла
+ * 
+ * some placese marked with `STDERR OUTPUT !!!!` (x_alloc) - FIX
+ * 
+ * --------------------------------------проверить рабоу clock_gettime один раз - при отрытии лога, и больш не проверять!!!
+ * 
+ * окрубгления заменить на макрос round_UP
+ * 
+ * не проверять NUM нутри лог функций на превышение NUM_APRAM_MAX
+ * 
+ * обнулять LOG* как-то при останове. как? хранить адрес клиенской переминнойй?
+ * 
+ * 
+ * макросы DEV_DEBUG для всяких "лишних" проверок
+ * 
+ * преаллок для Full сделал грубо. надо? размер через config?
+ * 
+ * возможно нормалный формат даты, через календарную функцию а не через остаток делениЯ
  */
 
 
@@ -87,7 +114,7 @@
 //fprintf(stderr, ERR_MESSAGE("val i=%i k=%iand it is not good\n",a,b)  );
 //fprintf(stderr, ERR_MESSAGE("val is not good\n")  );
 
-
+#define ROUND__UP(vol, round_to)  ( (     ((vol)-1) / (round_to) + 1      ) * (round_to)  )
 
 extern const char *__progname;
 //backtrace to know caller function
@@ -113,8 +140,6 @@ extern const char *__progname;
 #define LOG_F_NAME_LEN 4096
 #endif
 
-//variadic param length
-#define PARAMS_FIXED_NUM 16
 
 #define NOSPINLOCK
 
@@ -129,9 +154,8 @@ static long timezone_offset;
 //static unsigned long long cycles_in_one_usec = 1000000L; //защита от деления на ноль
 static struct timespec logOpenTime;
 //static volatile int endlessCycle = 1;
-static const size_t logLogFullObjBufLen = 2048;
 static int time_source = CLOCK_ID_WALL_FAST; //global. same for all logs
-
+static const size_t logLogFullBufLen = 1024;
 //not need any more
 //static unsigned long logQueueSize(Poro_t logFile, void (*error_fun)(char *fstring,...));
 
@@ -140,10 +164,10 @@ static int time_source = CLOCK_ID_WALL_FAST; //global. same for all logs
 
 static const uint8_t stop_tb[128] __attribute__ ((aligned(sizeof(uintptr_t)))) =
   {
-    4,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+    5,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
     0,0,0,0,0,0,0,0,0,0,0,0,0,
                   /* '%' */  3,            0, /* '\''*/  0,
-	       0,            0, /* '*' */  0, /* '+' */  0,
+	       0,            0, /* '*' */  4, /* '+' */  0,
 	       0, /* '-' */  0, /* '.' */  0,            0,
     /* '0' */  0, /* '1' */  0, /* '2' */  0, /* '3' */  0,
     /* '4' */  0, /* '5' */  0, /* '6' */  0, /* '7' */  0,
@@ -167,8 +191,6 @@ static const uint8_t stop_tb[128] __attribute__ ((aligned(sizeof(uintptr_t)))) =
     0,0,0,0,0
   };
 
-//compact 64 byte dic. 4 symbol types in 1 byte: {0..3, 0..3, 0..3, 0..3}
-static uint8_t stop_tb_Q[256/4] __attribute__ ((aligned(sizeof(uintptr_t)))) = {0};
 
 //inernal use only, degerous!
 //static int logCleaup();
@@ -176,7 +198,6 @@ static int logCleaup(void (*error_fun)(char *fstring,...));
 static void logRedirect_stderr(Poro_t logFile, const char *funname, struct timespec time, const char* format, va_list ap);
 //пока тут. куда дальше ее сунуть не знаю
 static int str_s_cpy(char *dest, const char *src, size_t sizeof_dest);
-static void prepare_Q();
 //size_t const cache_line_size = 64; sysconf(_SC_LEVEL3_CACHE_LINESIZE)
 static void *x_alloc_aligned_zeroed_locked (size_t __size, int must_mlock);
 static void *x_alloc_aligned_zeroed_locked_page (size_t __size, int must_mlock);
@@ -189,13 +210,18 @@ typedef struct Q_element{
     struct timespec realtime;
     struct timespec monotime;
     const char *format_string;
+    char *full_string;
     uintptr_t params[PARAMS_FIXED_NUM];
+    //uintptr_t *params;
+    void *params_p;
     uintptr_t params_free_mask;
+    size_t full_string_len;
     int num;
     //int64_t element_number;
     int is_alloc_addr;//when allock by pagesize only first element can be free()
     
     struct Q_element *next __attribute__ ((aligned(sizeof(uintptr_t))));;
+    
     
     
 } Q_element __attribute__ ((aligned(sizeof(uintptr_t))));
@@ -233,16 +259,14 @@ struct FD_LIST_ITEM{
     FILE *FD;
     LOG_QUEUE QUEUE  __attribute__ ((aligned(sizeof(uintptr_t))));;
     char *custom_io_buf;
-    //expensive to access this field (pref)
     //clockid_t time_source; //usualy no reason to use different time source
     //int timestamp_utc;     //utc is for mononic time source
     struct FD_LIST_ITEM *next;
     int withlock;
-    //int do_mlock;
     
     volatile int insert_forbidden __attribute__ ((aligned(sizeof(uintptr_t))));
     
-    char log_filename[LOG_F_NAME_LEN];
+    char *log_filename;
     
 } __attribute__ ((aligned(sizeof(uintptr_t)))); 
 
@@ -264,7 +288,7 @@ static volatile long logFlushThreadStarted = 0;
 
 
 
-void oroLogTruncate(){
+void oroLogTruncate(Poro_t logFile){
     requestForLogsTruncate=1;
     return;
 }
@@ -285,7 +309,8 @@ static void *x_alloc_aligned_zeroed_locked (size_t __size, int must_mlock){
         if (mlock(P, new_size) != 0) {
             if (must_mlock == 1) {
                 //STDERR OUTPUT !!!!
-                fprintf(stderr, "mlock in x_alloc_aligned_zeroed_locked failed: %s\n",strerror(errno));
+                assert_perror(errno);
+                //fprintf(stderr, "mlock in x_alloc_aligned_zeroed_locked failed: %s\n",strerror(errno));
                 free(P);
                 P = NULL;
             }
@@ -311,7 +336,8 @@ static void *x_alloc_aligned_zeroed_locked_page (size_t __size, int must_mlock){
         if (mlock(ptr, __size) != 0) {
             if (must_mlock == 1) {
                 //STDERR OUTPUT !!!!
-                fprintf(stderr, "mlock in x_alloc_aligned_zeroed_locked_page failed: %s\n",strerror(errno));
+                assert_perror(errno);
+                //fprintf(stderr, "mlock in x_alloc_aligned_zeroed_locked_page failed: %s\n",strerror(errno));
                 free(ptr);
                 ptr = NULL;
             }
@@ -333,10 +359,14 @@ static Q_element * alloc_Q_list_inside_page(Q_element * tail, int lock) {
     Q_e_ptr->is_alloc_addr = 1;
 
     for (int e = 0; e < (n_of_Qe_in_one_page - 1); e++) {
+        //Q_e_ptr[e].params=calloc(PARAMS_FIXED_NUM,sizeof(uintptr_t));
         Q_e_ptr[e].next = &(Q_e_ptr[e + 1]);
-        //Q_e_ptr[e].element_number = (e + 1)+( page_num * n_of_Qe_in_one_page);
+        Q_e_ptr[e].full_string = x_alloc_aligned_zeroed_locked(logLogFullBufLen, -1);
+        Q_e_ptr[e].full_string_len = pagesize;
     }
-    //Q_e_ptr[n_of_Qe_in_one_page - 1].element_number = (n_of_Qe_in_one_page - 1 + 1)+( page_num * n_of_Qe_in_one_page);
+    //alloc one page for logFull, less?
+    Q_e_ptr[n_of_Qe_in_one_page - 1].full_string = x_alloc_aligned_zeroed_locked(logLogFullBufLen, -1);
+    Q_e_ptr[n_of_Qe_in_one_page - 1].full_string_len = pagesize;
     Q_e_ptr[n_of_Qe_in_one_page - 1].next = tail;
 
     return Q_e_ptr;
@@ -463,7 +493,11 @@ static void * logWrite_thread(void *e_fun){
                 //запомнить предыдущую секунду и не высчитывать hr min sec заново!!!
                 
                 if(UNLIKELY(prev_sec != E->realtime.tv_sec)){
-                    
+                    /*
+                     * 
+                     * возможно нормалный формат даты, через календарную функцию
+                     
+                     */
                     prev_sec = E->realtime.tv_sec;
                             
                     //sec = (prev_sec + (LOG->timestamp_utc?0:timezone_offset) ) % 86400; //секунд в последних судках. 24*60*60=86400
@@ -520,12 +554,10 @@ static void * logWrite_thread(void *e_fun){
                 
                 switch (E->num) {
 
-                    
                     case -1: //E->num == -1 means logLogFull and we need free on format_string
                     {
-                        fputs_unlocked(E->format_string, F);
-                        free((void *) E->format_string);
-                        E->format_string = NULL;
+                        
+                        fputs_unlocked(E->full_string, F);
                         break;
 
                     }
@@ -543,7 +575,7 @@ static void * logWrite_thread(void *e_fun){
                         uintptr_t *p = E->params;
 
                         //COMPILLE TIME limit on params number
-                        _Static_assert(PARAMS_FIXED_NUM < 25, "HARCODED MAXIMUM FOR PARAMS_FIXED_NUM IS 24");
+                        _Static_assert(PARAMS_FIXED_NUM < 33, "HARCODED MAXIMUM FOR PARAMS_FIXED_NUM IS 24");
 
 
                         fprintf(F, E->format_string,
@@ -617,6 +649,30 @@ static void * logWrite_thread(void *e_fun){
 #if PARAMS_FIXED_NUM > 23
                                 , p[23]
 #endif
+#if PARAMS_FIXED_NUM > 24
+                                , p[24]
+#endif
+#if PARAMS_FIXED_NUM > 25
+                                , p[25]
+#endif
+#if PARAMS_FIXED_NUM > 26
+                                , p[26]
+#endif
+#if PARAMS_FIXED_NUM > 27
+                                , p[27]
+#endif
+#if PARAMS_FIXED_NUM > 28
+                                , p[28]
+#endif
+#if PARAMS_FIXED_NUM > 29
+                                , p[29]
+#endif
+#if PARAMS_FIXED_NUM > 30
+                                , p[30]
+#endif
+#if PARAMS_FIXED_NUM > 31
+                                , p[31]
+#endif
 
                                 );
 
@@ -625,12 +681,13 @@ static void * logWrite_thread(void *e_fun){
 
                             uintptr_t f = E->params_free_mask;
 
-                            for (int i = 0; i < PARAMS_FIXED_NUM; i++) {
+                            for (int i = 0; i < PARAMS_FIXED_NUM && f!=0; i++) {
                                 if ((f & 0x1) == 0x1) {
                                     free((void*) (p[i]));
                                     p[i] = 0;
                                 }
                                 f >>= 1;
+                                
                             }
                             //sure?
                             //E->params_free_mask = 0;
@@ -657,7 +714,7 @@ static void * logWrite_thread(void *e_fun){
 
                 
                 Q->tail = E;
-                Q->cnt_out+=1;
+                //Q->cnt_out+=1;
 
             }//while
         }//for N
@@ -693,12 +750,13 @@ static void * logWrite_thread(void *e_fun){
 
         //FLUSH every SECOND
         struct timespec Flush = {0};
-        errno = 0;
+        clock_gettime(CLOCK_ID_MEASURE_FAST, &Flush);
+        /*errno = 0;
         if (clock_gettime(CLOCK_ID_MEASURE_FAST, &Flush) < 0) {
             if(error_fun)
                 error_fun(ERR_MESSAGE("clock_gettime FAILed: %s\n", strerror(errno)));
             
-        }
+        }*/
         if (Flush.tv_sec > prevFlush.tv_sec) { //HARDCODE flsuh every 1 sec
             for (struct FD_LIST_ITEM * LOG = FD_LIST; LOG; LOG = LOG->next) {
                 if (LOG->FD != NULL) {
@@ -734,7 +792,7 @@ logFlush_thread__exit:
 int oroWriterStart(int bind_cpu, void (*error_fun)(char *fstring, ...)) {
     pthread_attr_t af_pth_attrs_r;
     
-    prepare_Q();
+    
     
     if(logFlushThreadStarted){
         if (error_fun)error_fun(
@@ -936,10 +994,22 @@ static int logCleaup(void (*error_fun)(char *fstring,...)){
                 LOG->custom_io_buf=NULL;
             }
             
+            if(LOG->log_filename){
+                free(LOG->log_filename);
+                LOG->log_filename=NULL;
+            }
 
             //т.к. аллокация страницами мы не можем осободить серединку
             //free(Q->head);
+            void *free_later=NULL;
+            //если так поучилось, что сдесь залип первый эллемент, мы не можем его высвободить, т.к. будем сейчас ходить по связанным с ним эллементам
+            //запомним и освободим позже
+            if(Q->head){
+                if(Q->head->is_alloc_addr){
+                    free_later=Q->head;
+                }
             Q->head=NULL;
+            }
 
 
             if(Q->return_tail){
@@ -966,6 +1036,10 @@ static int logCleaup(void (*error_fun)(char *fstring,...)){
                 Q->return_tail=NULL;
 
             }
+            if(free_later){
+                free(free_later);
+                free_later=NULL;
+            }
             
           
             
@@ -981,12 +1055,6 @@ static int logCleaup(void (*error_fun)(char *fstring,...)){
     }
         
     
-    
-    
-    
-    
-    
-    //fprintf(stderr,"logCleaup\n");
     
     return 0;
     
@@ -1036,42 +1104,14 @@ Poro_t oroLogOpen(oro_attrs_t config, void (*error_fun)(char *fstring,...)){
 
 
 
-    size_t n_of_Qe_in_one_page = pagesize / sizeof (Q_element);
-    config.return_q = (((config.return_q - 1) / n_of_Qe_in_one_page) + 1) * n_of_Qe_in_one_page;
-    size_t total_pages_we_need = config.return_q / n_of_Qe_in_one_page;
-
-
-    Q_element *HEAD = NULL;
-    Q_element *TAIL = NULL;
-
-    //формируем в голову
-    for (int p = 0; p < total_pages_we_need; p++) {
-        HEAD = alloc_Q_list_inside_page(HEAD, config.do_mlock);
-    }
-    //поиск конца
-    for (Q_element *tmp = HEAD; tmp != NULL; tmp = tmp->next) {
-        if (tmp->next == NULL)
-            TAIL = tmp;
-    }
-
-
-    LOG->QUEUE.return_head = TAIL;
-    LOG->QUEUE.return_tail = HEAD->next;
-
-    //first element use for WriteThread passiv element
-    LOG->QUEUE.head = HEAD;
-    LOG->QUEUE.tail = HEAD;
-    HEAD->next = NULL;
 
 
 
 
-
-
-    //int p = PTHREAD_PROCESS_SHARED;
-    errno=0;
+    //int p = PTHREAD_PROCESS_PRIVATE;
+    //errno=0;
     assert_msg(
-            pthread_spin_init(&(LOG->QUEUE.insert_lock),PTHREAD_PROCESS_SHARED) == 0 
+            pthread_spin_init(&(LOG->QUEUE.insert_lock),PTHREAD_PROCESS_PRIVATE) == 0 
             , "pthread_spin_init FAILed");
         
     //? memset before?
@@ -1090,6 +1130,8 @@ Poro_t oroLogOpen(oro_attrs_t config, void (*error_fun)(char *fstring,...)){
         if (logOpenTime.tv_sec == 0) {
             errno = 0;
             //критично. сразу на выход
+            //проверяем что clock_gettime работает только здесь!!!
+            //больше нигде
             assert_msg (clock_gettime(CLOCK_ID_WALL_FAST, &logOpenTime) == 0, "clock_gettime FAILed");
         }
 
@@ -1108,7 +1150,7 @@ Poro_t oroLogOpen(oro_attrs_t config, void (*error_fun)(char *fstring,...)){
         //   path / f_name_part1 . f_name_part2  . f_name_part3 . datetime .log
 
 
-        memset(log_filename_template,0,sizeof(log_filename_template));
+        //memset(log_filename_template,0,sizeof(log_filename_template));
         char *p = log_filename_template;
         const size_t so = sizeof(log_filename_template);
         
@@ -1273,20 +1315,68 @@ Poro_t oroLogOpen(oro_attrs_t config, void (*error_fun)(char *fstring,...)){
         }
     }
     
+    
+    
+    
+    
+
+    /*
+     * ПЕРЕНЕСТИ!!!! аллокацию очереди после открытия файла!!!
+     * а то какая-то ерунда получуется
+     */
+
+    size_t n_of_Qe_in_one_page = pagesize / sizeof (Q_element);
+    config.return_q = (((config.return_q - 1) / n_of_Qe_in_one_page) + 1) * n_of_Qe_in_one_page;
+    size_t total_pages_we_need = config.return_q / n_of_Qe_in_one_page;
+
+    /*fprintf(stderr,"PARAMS_FIXED_NUM: %i\n"
+            "n_of_Qe_in_one_page: %zu\n"
+            "sizeof (Q_element): %zu\n"
+            "total_pages_we_need: %zu\n"
+            , PARAMS_FIXED_NUM
+            ,n_of_Qe_in_one_page
+            ,sizeof (Q_element)
+            ,total_pages_we_need);*/
+
+    Q_element *HEAD = NULL;
+    Q_element *TAIL = NULL;
+
+    //формируем в голову
+    for (int p = 0; p < total_pages_we_need; p++) {
+        HEAD = alloc_Q_list_inside_page(HEAD, config.do_mlock);
+    }
+    //поиск конца
+    for (Q_element *tmp = HEAD; tmp != NULL; tmp = tmp->next) {
+        if (tmp->next == NULL)
+            TAIL = tmp;
+    }
+
+
+    LOG->QUEUE.return_head = TAIL;
+    LOG->QUEUE.return_tail = HEAD->next;
+
+    //first element use for WriteThread passiv element
+    LOG->QUEUE.head = HEAD;
+    LOG->QUEUE.tail = HEAD;
+    HEAD->next = NULL;
+    
+    
+    
     fprintf(t,"# File opened. time_source %i, timestamp_utc %i, bufsize %zi, return_q %i\n",config.time_source,config.timestamp_utc,config.bufsize,config.return_q);
         
    
     LOG->FD=t;
     
     //same len by macro LOG_F_NAME_LEN
-    memcpy(LOG->log_filename,log_filename_template,sizeof(log_filename_template));
+    //memcpy(LOG->log_filename,log_filename_template,sizeof(log_filename_template));
+    LOG->log_filename = strdup(log_filename_template);
     
     
     //ts config
     //LOG->time_source=config.time_source;
     //LOG->timestamp_utc=config.timestamp_utc;
     
-    //expensive (by perf)
+    
     time_source=config.time_source;
     
     
@@ -1364,7 +1454,7 @@ void oroLogFixed5_unlocked(Poro_t logFile, const char* format, uintptr_t p1, uin
     
     
     //Do we need sanity check?
-    assert_msg(LOG->withlock == 0, "Use oroLogFixed5_unlocked for LOG expecting locks");
+    //assert_msg(LOG->withlock == 0, "Use oroLogFixed5_unlocked for LOG expecting locks");
     
 
     if(UNLIKELY(LOG->insert_forbidden == 1)){
@@ -1393,8 +1483,8 @@ void oroLogFixed5_unlocked(Poro_t logFile, const char* format, uintptr_t p1, uin
     //MFENCE;
     //MFENCE_LITE;
     
-
-    assert_msg(ENTRY != NULL,"Got non valid Queue element pointer");
+    //а нада?
+    //assert_msg(ENTRY != NULL,"Got non valid Queue element pointer");
 
     
     uintptr_t *p = ENTRY->params;
@@ -1419,7 +1509,7 @@ void oroLogFixed5_unlocked(Poro_t logFile, const char* format, uintptr_t p1, uin
     /*next!*/
     Q->head->next=ENTRY;
     Q->head=ENTRY;
-    Q->cnt_in+=1;
+    //Q->cnt_in+=1;
     
     
 }
@@ -1440,8 +1530,8 @@ void oroLogFixed(Poro_t logFile, size_t NUM, const char* format,  ...){
         clock_gettime(time_source,&time);
 
     
-    //assert(logFile!=NULL);
-    assert_msg(NUM<=PARAMS_FIXED_NUM, "NUM is limited! MAX: " __STRING(PARAMS_FIXED_NUM));
+    //через макрос
+    //assert_msg(NUM<=PARAMS_FIXED_NUM, "NUM is limited! expecting: ");
 
     
     __builtin_prefetch((struct FD_LIST_ITEM *)logFile);
@@ -1469,8 +1559,7 @@ void oroLogFixed(Poro_t logFile, size_t NUM, const char* format,  ...){
     
 //несколько тредов будут разбирать список, нужна блокировка. это конечно неахти
   
-    if(LOG->withlock)
-        pthread_spin_lock(&(Q->insert_lock));
+    if(LOG->withlock) pthread_spin_lock(&(Q->insert_lock));
     
     //add some to Q if it is empty
     if(UNLIKELY(Q->return_tail->next == NULL)){
@@ -1484,15 +1573,14 @@ void oroLogFixed(Poro_t logFile, size_t NUM, const char* format,  ...){
     Q->return_tail = Q->return_tail->next;
     
 
-    if(LOG->withlock)
-        pthread_spin_unlock(&(Q->insert_lock));
+    if(LOG->withlock) pthread_spin_unlock(&(Q->insert_lock));
    
     
     //MFENCE;
     //MFENCE_LITE;
     
-    //неважно какой истоник элемента - обнулить!
-    assert_msg(ENTRY != NULL,"Got non valid Queue element pointer");
+    //а нада?
+    //assert_msg(ENTRY != NULL,"Got non valid Queue element pointer");
     
     uintptr_t *p = ENTRY->params;
 
@@ -1514,26 +1602,26 @@ void oroLogFixed(Poro_t logFile, size_t NUM, const char* format,  ...){
     
     Q_NEXT_FENCE;
     
-    if(LOG->withlock)
-        pthread_spin_lock(&(Q->insert_lock));
+    if(LOG->withlock) pthread_spin_lock(&(Q->insert_lock));
     
     /*next!*/
     Q->head->next=ENTRY;
     Q->head=ENTRY;
-    Q->cnt_in+=1;
+    //Q->cnt_in+=1;
     
-    if(LOG->withlock)
-        pthread_spin_unlock(&(Q->insert_lock));
+    if(LOG->withlock) pthread_spin_unlock(&(Q->insert_lock));
     
     
 }
+
+
 /**
  * Log format string with limited number of params, but counting at runtime and doing strdup() on %s
  * @param logFile
  * @param format
  * @param ...
  */
-void oroLogRelaxed(Poro_t logFile, const char* format,  ...) {
+void oroLogRelaxed(Poro_t logFile, size_t NUM, const char* format,  ...) {
     
     struct timespec time={0};
     
@@ -1557,10 +1645,11 @@ void oroLogRelaxed(Poro_t logFile, const char* format,  ...) {
     Q_element *ENTRY;
     LOG_QUEUE *Q = &(LOG->QUEUE);
     
+    if(LOG->withlock) pthread_spin_lock(&(Q->insert_lock));
     
     //add some to Q if it is empty
     if(UNLIKELY(Q->return_tail->next == NULL)){
-        //lock after start is dangerous!!! 
+        //locking mem after start is dangerous!!! 
         Q->return_tail=alloc_Q_list_inside_page(Q->return_tail,-1);
         //fprintf(stderr,"RETURN Q EMPTY\n");
     }
@@ -1569,9 +1658,10 @@ void oroLogRelaxed(Poro_t logFile, const char* format,  ...) {
     ENTRY = Q->return_tail;
     Q->return_tail = Q->return_tail->next;
     
-        
+    if(LOG->withlock) pthread_spin_unlock(&(Q->insert_lock));
     
-    assert_msg(ENTRY != NULL,"Got non valid Queue element pointer");
+    //а нада?
+    //assert_msg(ENTRY != NULL,"Got non valid Queue element pointer");
     
     
     
@@ -1583,6 +1673,7 @@ void oroLogRelaxed(Poro_t logFile, const char* format,  ...) {
 
     const char *string = format;
     int num = 0;
+    __builtin_prefetch(stop_tb);
     while (   (string = strchr(string,'%'))!= NULL ){
     
         
@@ -1612,7 +1703,14 @@ void oroLogRelaxed(Poro_t logFile, const char* format,  ...) {
                     {
                         goto next;
                     }
-                    case 4: //'\0'
+                    case 4: //'*'
+                    {
+                        p[num] = va_arg(arglist, uintptr_t);
+                        ++num;
+                        ++string;
+                        continue;
+                    }
+                    case 5: //'\0'
                     {
                         format="(bad format)";
                         goto exit_parsing;
@@ -1641,645 +1739,59 @@ exit_parsing:
     ENTRY->num = num; //количество либо 0 либо больше нуля
     
     
-    assert_msg(num <= PARAMS_FIXED_NUM, "NUM is limited! MAX: " __STRING(PARAMS_FIXED_NUM));
+    assert_msg(num == NUM, "oroLogRelaxed: NUM and number of format params differs");
     
     ENTRY->realtime = time;
     ENTRY->next=NULL;
     
     Q_NEXT_FENCE;
     
+    if(LOG->withlock) pthread_spin_lock(&(Q->insert_lock));
     
     Q->head->next=ENTRY;
     Q->head=ENTRY;
-    Q->cnt_in+=1;
+    //Q->cnt_in+=1;
 
-
-    
-}
-
-
-static int char_spec_mean(char c){
-        switch (c) {
-                case 'A':
-                case 'C':
-                case 'E':
-                case 'F':
-                case 'G':
-                case 'X':
-                case 'a':
-                case 'c':
-                case 'd':
-                case 'e':
-                case 'f':
-                case 'g':
-                case 'i':
-                case 'm':
-                case 'n':
-                case 'o':
-                case 'p':
-                case 'u':
-                case 'x':
-                    {
-                        return 1;
-                    }
-                    case 's':
-                    case 'S':
-                    {
-                        return 2;
-
-                    }
-                    case '%':
-                    {
-                        return 3;
-                    }
-                    default:
-                    {
-                        return 0;
-                    }
-                }
-        
-        perror("switch");
-        exit(EXIT_FAILURE);
-
-}
-
-static void prepare_Q(){
-    //return;
-    int jtb_index=0;
-    for(int i=0;i<256;i+=4){
-        int m =0;
-        char j=0;
-        m = char_spec_mean(i);
-        j|=m;
-        
-        m = char_spec_mean(i+1);
-        j|=m<<2;
-        
-        m = char_spec_mean(i+2);
-        j|=m<<4;
-        
-        m = char_spec_mean(i+3);
-        j|=m<<6;
-        
-        stop_tb_Q[jtb_index]=j;
-        jtb_index++;
-    }
-}
-/**
- * Same as oroLogRelaxed. Differ in a way of parsing format string. Conmpact jump table 64 bites. It is slower but more chance to stay on cache line.
- * @param logFile
- * @param format
- * @param ...
- */
-void oroLogRelaxed_Q(Poro_t logFile, const char* format,  ...) {
-    
-    assert(logFile!=0);
-    
-    struct FD_LIST_ITEM *LOG=(struct FD_LIST_ITEM *)logFile;
-    va_list arglist;
-    Q_element *ENTRY;
-    
-        struct timespec time={0};
-    
-    
-    if(time_source>=0)
-        clock_gettime(time_source,&time);
-
-    
-
-    if(UNLIKELY(LOG->insert_forbidden == 1)){
-        
-        va_start(arglist, format);
-        logRedirect_stderr(logFile,__func__,time,format,arglist);
-        va_end(arglist);
-        
-        return;
-    }
-    
-    
-    
-    LOG_QUEUE *Q = &(LOG->QUEUE);
-    
-    
-  
-    
-    //add some to Q if it is empty
-    if(UNLIKELY(Q->return_tail->next == NULL)){
-        //lock after start is dangerous!!! 
-        Q->return_tail=alloc_Q_list_inside_page(Q->return_tail,-1);
-        //fprintf(stderr,"RETURN Q EMPTY\n");
-    }
-    //not checking. Under lock it does not metter
-    //alloc_Q_list_inside_page does abort on problem with memory
-    ENTRY = Q->return_tail;
-    Q->return_tail = Q->return_tail->next;
-    
-    
-       
-    
-    assert_msg(ENTRY != NULL,"Got non valid Queue element pointer");
-    memset(ENTRY,0,sizeof (Q_element));
-    
-    
-    
-    
-    //errno = 0;
-    va_start(arglist, format); //LAST PARAM!!!
-    
-    uintptr_t *p = ENTRY->params;
-
-    const char *string = format;
-    int num = 0;
-    while (   (string = strchr(string,'%'))!= NULL ){
-    //if (*string == '%')
-    
-        //след. симв. после начала формата и дпока не найдем конец формата
-        ++string;
-        while(*string != '\0'){
-            uint8_t v=0;
-            char c=*string;
-                    
-
-                    uint8_t pos = c / 4;
-                    
-                    v = stop_tb_Q[pos];
-                    if(v){
-                    uint8_t sub_pos = (c % 4)*2;
-                    v >>= sub_pos;
-                    v &= 0x3;
-                    }
-
-                //}
-            switch (v) {
-                    case 0://any
-                    {
-                        ++string;
-                        continue;
-                    }
-                    case 1://'i' 'u' 'd' 'a' ...
-                    {
-                        p[num] = va_arg(arglist, uintptr_t);
-                        ++num;
-                        goto next;
-                    }
-                    case 2: //'s'
-                    {
-                        p[num] = (uintptr_t) strdup(va_arg(arglist, char *));
-                        ENTRY->params_free_mask |= 1 << num;
-                        ++num;
-                        goto next;
-
-                    }
-                    case 3: //'%'
-                    {
-                        goto next;
-                    }
-                    default:
-                    {
-                        ++string;
-                        continue;
-                    }
-                }
-            
-        }//search for end
-        if(*string == '\0'){
-            format="(bad format)";
-            goto exit_parsing;
-        }
-    
-next:    
-    //конец формата найден. перешагнуть его
-    ++string;
-  }//outer while
-    
-exit_parsing: 
-    
-
-    va_end(arglist);
-    
-    ENTRY->format_string = format;
-    ENTRY->num = num; //количество либо 0 либо больше нуля
-    
-    assert_msg(num <= PARAMS_FIXED_NUM, "NUM is limited! MAX: " __STRING(PARAMS_FIXED_NUM));
-    
-    ENTRY->realtime = time;
-    
-    Q_NEXT_FENCE;
-    
-    Q->head->next=ENTRY;
-    Q->head=ENTRY;
-    Q->cnt_in+=1;
-
+    if(LOG->withlock) pthread_spin_unlock(&(Q->insert_lock));
 
     
 }
 
-/**
- * Same as oroLogRelaxed but without jump table. Just switch with letters
- * @param logFile
- * @param format
- * @param ...
- */
-void oroLogRelaxed_wojt(Poro_t logFile, const char* format,  ...) {
-    
-
-    assert(logFile!=0);
-    struct FD_LIST_ITEM *LOG=(struct FD_LIST_ITEM *)logFile;
-    
-    va_list arglist;
-    Q_element *ENTRY;
-    
-        struct timespec time={0};
-    
-    
-    if(time_source>=0)
-        clock_gettime(time_source,&time);
-
-    
-
-    if(UNLIKELY(LOG->insert_forbidden == 1)){
-        
-        va_start(arglist, format);
-        logRedirect_stderr(logFile,__func__,time,format,arglist);
-        va_end(arglist);
-        
-        return;
-    }
-    
-    
-    
-    LOG_QUEUE *Q = &(LOG->QUEUE);
-    
-    
-    
-    //add some to Q if it is empty
-    if(UNLIKELY(Q->return_tail->next == NULL)){
-        //lock after start is dangerous!!! 
-        Q->return_tail=alloc_Q_list_inside_page(Q->return_tail,-1);
-        //fprintf(stderr,"RETURN Q EMPTY\n");
-    }
-    //not checking. Under lock it does not metter
-    //alloc_Q_list_inside_page does abort on problem with memory
-    ENTRY = Q->return_tail;
-    Q->return_tail = Q->return_tail->next;
-    
-       
-    
-    assert_msg(ENTRY != NULL,"Got non valid Queue element pointer");
-    memset(ENTRY,0,sizeof (Q_element));
-    
-    
-    
-    
-    //errno = 0;
-    va_start(arglist, format); //LAST PARAM!!!
-    
-    uintptr_t *p = ENTRY->params;
-
-    const char *string = format;
-    int num = 0;
-    while (*string != '\0'){
-    if (*string == '%'){
-        
-        ++string;
-        while(*string != '\0'){
-            switch (*string) {
-
-                    case 'A':
-                    case 'C':
-                    case 'E':
-                    case 'F':
-                    case 'G':
-                    case 'X':
-                    case 'a':
-                    case 'c':
-                    case 'd':
-                    case 'e':
-                    case 'f':
-                    case 'g':
-                    case 'i':
-                    case 'm':
-                    case 'n':
-                    case 'o':
-                    case 'p':
-                    case 'u':
-                    case 'x':
-                    {
-                        p[num] = va_arg(arglist, uintptr_t);
-                        ++num;
-                        goto next;
-                    }
-                    case 's':
-                    case 'S':
-                    {
-                        p[num] = (uintptr_t) strdup(va_arg(arglist, char *));
-                        ENTRY->params_free_mask |= 1 << num;
-                        ++num;
-                        goto next;
-
-                    }
-                    case '%':
-                    {
-                        goto next;
-                    }
-                    default:
-                    {
-                        ++string;
-                        continue;
-                    }
-                }
-
-            }//search for end
-
-    }//start of format
-next:    
-    ++string;
-  }//outer while
-    
-    
-
-    va_end(arglist);
-    
-    ENTRY->format_string = format;
-    ENTRY->num = num; //количество либо 0 либо больше нуля
-    
-    assert_msg(num <= PARAMS_FIXED_NUM, "NUM is limited! MAX: " __STRING(PARAMS_FIXED_NUM));
-    
-    ENTRY->realtime = time;
-    
-       
-    Q->head->next=ENTRY;
-    Q->head=ENTRY;
-    Q->cnt_in+=1;
-
-    
-}
-
-/**
- * Same as oroLogRelaxed testing purpose only
- * @param logFile
- * @param format
- * @param ...
- */
-void oroLogRelaxedDummy(Poro_t logFile, const char* format,  ...) { 
-    
 
 
-    assert(logFile!=0);
+
+
+void oroLogRelaxed_X(Poro_t logFile, size_t NUM, const char* format,  ...) {
     
-//    struct FD_LIST_ITEM *LOG=(struct FD_LIST_ITEM *)logFile;
     
-    va_list arglist;
-    Q_element ENTRY;
+    static const void *const step0_jumps[] = {
+      &&case_any_char, &&case_copyable_format, &&case_dup_format, &&case_percent_symbol, &&case_variable_width_format, &&case_end_of_string,   
+    };
+    
     
     struct timespec time={0};
     
-    if(time_source>=0)
-        clock_gettime(time_source,&time);
-    
-    
-    va_start(arglist, format); //LAST PARAM!!!
-
-    //просто пробежаться пл сроке - 100+ нано
-
-    const char *string = format;
-    int num = 0;
-    while (*string != '\0'){
-    if (*string == '%'){
-        
-        ++string;
-        while(*string != '\0'){
-            //int n = stop_tb[*string];
-            switch (*string > 'x' ? 0 : stop_tb[(int)*string]) {
-                    case 0:
-                    {
-                        ++string;
-                        continue;
-                    }
-                    case 1:
-                    {
-                        ENTRY.params[num] = va_arg(arglist, uintptr_t);
-                        ++num;
-                        goto next;
-                    }
-                    case 2:
-                    {
-                        //мы пишем в стековую ENTRY и потом при выходе то что сделал strdup потеряется
-                        ENTRY.params[num] = (uintptr_t) strdup(va_arg(arglist, char *));
-                        ENTRY.params_free_mask |= 1 << num;
-                        ++num;
-                        goto next;
-
-                    }
-                    case 3:
-                    {
-                        goto next;
-                    }
-                    default:
-                    {
-                        ++string;
-                        continue;
-                    }
-                }
-        }//search for end
-
-    }//start of format
-next:    
-    ++string;
-  }//outer while
-    
-    
-
-    va_end(arglist);
-    
-    ENTRY.realtime = time;
-    
-    ENTRY.format_string = format;
-    ENTRY.num = num;
-    
-    //assert_msg(ENTRY.num <= PARAMS_FIXED_NUM);
-    
-    
-
-    
-}
-/**
- * Same as oroLogRelaxed testing purpose only
- * @param logFile
- * @param format
- * @param ...
- */
-void oroLogRelaxedDummy_wojt(Poro_t logFile, const char* format,  ...) { 
-    
-
-    assert(logFile!=0);
-//    struct FD_LIST_ITEM *LOG=(struct FD_LIST_ITEM *)logFile;
-    va_list arglist;
-    Q_element ENTRY;
-    
-    struct timespec time={0};
     
     if(time_source>=0)
         clock_gettime(time_source,&time);
-    
-    
-    va_start(arglist, format); //LAST PARAM!!!
 
-    //просто пробежаться пл сроке - 100+ нано
-
-    const char *string = format;
-    int num = 0;
-    while (*string != '\0'){
-    if (*string == '%'){
-        
-        ++string;
-        while(*string != '\0'){
-            switch (*string) {
-                case 'A':
-                case 'C':
-                case 'E':
-                case 'F':
-                case 'G':
-                case 'X':
-                case 'a':
-                case 'c':
-                case 'd':
-                case 'e':
-                case 'f':
-                case 'g':
-                case 'i':
-                case 'm':
-                case 'n':
-                case 'o':
-                case 'p':
-                case 'u':
-                case 'x':
-                    {
-                        ENTRY.params[num] = va_arg(arglist, uintptr_t);
-                        ++num;
-                        goto next;
-                    }
-                    case 's':
-                    case 'S':
-                    {
-                        //мы пишем в стековую ENTRY и потом при выходе то что сделал strdup потеряется
-                        ENTRY.params[num] = (uintptr_t) strdup(va_arg(arglist, char *));
-                        ENTRY.params_free_mask |= 1 << num;
-                        ++num;
-                        goto next;
-
-                    }
-                    case '%':
-                    {
-                        goto next;
-                    }
-                    default:
-                    {
-                        ++string;
-                        continue;
-                    }
-                }
-        }//search for end
-
-    }//start of format
-next:    
-    ++string;
-  }//outer while
-    
-    
-
-    va_end(arglist);
-    
-    ENTRY.realtime = time;
-    
-    ENTRY.format_string = format;
-    ENTRY.num = num;
-    
-    //assert_msg(ENTRY.num <= PARAMS_FIXED_NUM);
-    
-    
-
-    
-}
-
-
-oroObj_t * oroLogFullObj(size_t bytes){
-    if(bytes == 0){
-        bytes = logLogFullObjBufLen; //global Static 2048 bytes
-    }
-    oroObj_t *Obj = aligned_alloc(sizeof(uintptr_t), sizeof (oroObj_t));
-    assert_msg(Obj != NULL, "logObj aligned_alloc failed");
-    Obj->buf = aligned_alloc(sizeof(uintptr_t), bytes);
-    assert_msg(Obj->buf != NULL,"logObj buffer aligned_alloc failed");
-    memset(Obj->buf,0,bytes);
-    Obj->n = bytes;
-    
-    return Obj;
-}
-
-void oroLogFullObjFree(oroObj_t **Obj){
-    assert_msg(Obj != NULL, "Not valid Obj poiner");
-    assert_msg(*Obj != NULL, "Not valid Obj. Already free?");
-    
-    if((*Obj)->buf)
-        free((*Obj)->buf);
-
-    //memset(*Obj,0,sizeof(logObj));
-
-    free(*Obj);
-    *Obj=NULL;
-    
-    return;
-}
-
-/**
- * Log by format string with unlimited number of parameters. Buffer preallocated in Object and expanding as needed
- * @param logFile
- * @param obj preallocated with oroLogFullObj() buffer
- * @param format
- * @param ...
- */
-void oroLogFull(Poro_t logFile, oroObj_t *obj, const char* format,  ...) {
-
-    struct timespec time={0};
-    if(time_source>=0)
-        clock_gettime(time_source,&time);
-    
     __builtin_prefetch((struct FD_LIST_ITEM *)logFile);
     struct FD_LIST_ITEM *LOG=(struct FD_LIST_ITEM *)logFile;
-    
-    
-    
+
     va_list arglist;
     
-
-        
-
-
     if(UNLIKELY(LOG->insert_forbidden == 1)){
-        
         va_start(arglist, format);
         logRedirect_stderr(logFile,__func__,time,format,arglist);
         va_end(arglist);
-        
         return;
-    }
-    
-    //вот это врятли
-    if(obj->buf == NULL){
-        obj->buf = aligned_alloc(sizeof(uintptr_t), logLogFullObjBufLen);
-        assert_msg(obj->buf != NULL,"logObj buf aligned_alloc failed");
-        obj->n = logLogFullObjBufLen;
-        //fprintf(stderr,"temp_format alloc\n");
     }
     
     
     Q_element *ENTRY;
-    LOG_QUEUE *Q;
-    Q = &(LOG->QUEUE);
-
+    LOG_QUEUE *Q = &(LOG->QUEUE);
     
-    
+    if(LOG->withlock) pthread_spin_lock(&(Q->insert_lock));
     
     //add some to Q if it is empty
     if(UNLIKELY(Q->return_tail->next == NULL)){
@@ -2292,64 +1804,98 @@ void oroLogFull(Poro_t logFile, oroObj_t *obj, const char* format,  ...) {
     ENTRY = Q->return_tail;
     Q->return_tail = Q->return_tail->next;
     
-    
-      
-    
-    assert_msg(ENTRY != NULL,"Got non valid Queue element pointer");
-    memset(ENTRY,0,sizeof (Q_element));
-
-    int n=0;
-    
-    do {
-        va_start(arglist, format); //LAST PARAM!!!
-        //errno = 0;
-        n = vsnprintf(obj->buf, obj->n, format, arglist);
-        //assert_perror(errno);
-        va_end(arglist);
-        if (n >= obj->n) {
-            size_t need = n  -  obj->n  ;
-            //round to logLogFullObjBufLen + 1 for '\0'
-            size_t new_size = (((obj->n + need + 1)/logLogFullObjBufLen) + 1)*logLogFullObjBufLen;
-            char *t = aligned_alloc(sizeof (uintptr_t), new_size);
-            assert_msg(t != NULL,"Obj buf expand aligned_alloc failed");
-            obj->buf = t;
-            obj->n = new_size;
-        } else {
-            break;
-        }
-
-    } while (1);
-    
-    assert_msg(n>0, "something wrong with vsnprintf");
-    
-    n+=1;
-    
-    char *f = malloc(n);
-    
-    assert_msg(f != NULL,"malloc for finil string failed");
-    
-    memcpy(f,obj->buf,n);
-    
-    ENTRY->format_string=f;
+    if(LOG->withlock) pthread_spin_unlock(&(Q->insert_lock));
+        
+    //а нада?
+    //assert_msg(ENTRY != NULL,"Got non valid Queue element pointer");
     
     
     
-    ENTRY->num = -1; // need FREE on `format_string`
+    va_start(arglist, format); //LAST PARAM!!!
+    
+    uintptr_t *p = ENTRY->params;
     
     ENTRY->params_free_mask=(uintptr_t)0;
+
+    const char *string = format;
+    int num = 0;
+    __builtin_prefetch(stop_tb);
+    while ((string = strchr(string, '%')) != NULL) {
+
+
+        ++string;
+        for (;;) {
+
+            if (*string > 'x')
+                goto case_any_char;
+            goto *(step0_jumps [ stop_tb[(int) *string]]);
+
+
+
+case_any_char://any
+            {
+                ++string;
+                continue;}
+case_copyable_format://'i' 'u' 'd' 'a' ...
+            {
+                p[num] = va_arg(arglist, uintptr_t);
+                ++num;
+                goto next;}
+case_dup_format: //'s'
+            {
+                p[num] = (uintptr_t) strdup(va_arg(arglist, char *));
+                ENTRY->params_free_mask |= 1 << num;
+                ++num;
+                goto next;}
+case_percent_symbol: //'%'
+            {
+                goto next;}
+case_variable_width_format:
+            {
+                p[num] = va_arg(arglist, uintptr_t);
+                ++num;
+                ++string;
+                continue;}
+case_end_of_string: //'\0'
+            {
+                format = "(bad format)";
+                goto exit_parsing;}
+        }//search for end
+
+
+
+next:
+        ++string;
+    }//outer while
+    
+exit_parsing:    
+
+    va_end(arglist);
+    
+    ENTRY->format_string = format;
+    ENTRY->num = num; //количество либо 0 либо больше нуля
+    
+    
+    assert_msg(num == NUM, "oroLogRelaxed_X: NUM and number of format params differs");
     
     ENTRY->realtime = time;
+    ENTRY->next=NULL;
     
     Q_NEXT_FENCE;
     
+    if(LOG->withlock) pthread_spin_lock(&(Q->insert_lock));
     
     Q->head->next=ENTRY;
     Q->head=ENTRY;
-    Q->cnt_in+=1;
+    //Q->cnt_in+=1;
 
+    if(LOG->withlock) pthread_spin_unlock(&(Q->insert_lock));
 
     
 }
+
+
+
 
 /**
  * Log by format string with unlimited number of parameters. Buffer preallocated and expanding as needed
@@ -2359,7 +1905,12 @@ void oroLogFull(Poro_t logFile, oroObj_t *obj, const char* format,  ...) {
  * @param ...
  * @return lenght of buffer. may by ge expecting_byte
  */
-size_t oroLogFulla(Poro_t logFile, size_t expecting_byte, const char* format,  ...){
+size_t oroLogFull(Poro_t logFile, size_t expecting_byte, const char* format,  ...){
+    
+    
+    /*
+     * pagesize allocation!!!!????
+     */
     
     struct timespec time={0};
     if(time_source>=0)
@@ -2372,6 +1923,7 @@ size_t oroLogFulla(Poro_t logFile, size_t expecting_byte, const char* format,  .
     
     va_list arglist;
 
+    
     if(UNLIKELY(LOG->insert_forbidden == 1)){
         va_start(arglist, format);
         logRedirect_stderr(logFile,__func__,time,format,arglist);
@@ -2384,7 +1936,7 @@ size_t oroLogFulla(Poro_t logFile, size_t expecting_byte, const char* format,  .
     Q = &(LOG->QUEUE);
 
     
-    
+    if(LOG->withlock) pthread_spin_lock(&(Q->insert_lock));
     
     //add some to Q if it is empty
     if(UNLIKELY(Q->return_tail->next == NULL)){
@@ -2397,29 +1949,49 @@ size_t oroLogFulla(Poro_t logFile, size_t expecting_byte, const char* format,  .
     ENTRY = Q->return_tail;
     Q->return_tail = Q->return_tail->next;
 
-    
+    if(LOG->withlock) pthread_spin_unlock(&(Q->insert_lock));
       
+    //а нада?
+    //assert_msg(ENTRY != NULL,"Got non valid Queue element pointer");
     
-    assert_msg(ENTRY != NULL,"Got non valid Queue element pointer");
-    //memset(ENTRY,0,sizeof (Q_element));
 
     int n=0;
+    /*
+     * round mem to pagesize?
+     */
+    if(ENTRY->full_string == NULL){
+        fprintf(stderr,"oroLogFull: preallog full_string\n");
+        ENTRY->full_string = aligned_alloc(sizeof(uintptr_t), expecting_byte);
+        ENTRY->full_string_len = expecting_byte;
+        
+    }else if (ENTRY->full_string_len<expecting_byte){
+        fprintf(stderr,"oroLogFull: expand full_string by expecting_byte\n");
+        char *t = aligned_alloc(sizeof(uintptr_t), expecting_byte);
+        assert(t!=NULL);
+        free(ENTRY->full_string);
+        ENTRY->full_string=t;
+        ENTRY->full_string_len = expecting_byte;
+    }
     
-    char *buf = aligned_alloc(sizeof(uintptr_t), expecting_byte);
     
     do {
         va_start(arglist, format); //LAST PARAM!!!
-        //errno = 0;
-        n = vsnprintf(buf, expecting_byte, format, arglist);
-        //assert_perror(errno);
+        
+        n = vsnprintf(ENTRY->full_string, ENTRY->full_string_len, format, arglist);
+        
         va_end(arglist);
-        if (n >= expecting_byte) {
-            size_t need = n  -  expecting_byte  ;
-            //round to logLogFullObjBufLen + 1 for '\0'
-            size_t new_size = (((expecting_byte + need + 1)/sizeof(uintptr_t)) + 1)*sizeof(uintptr_t);
+        if (n >= ENTRY->full_string_len) {
+            fprintf(stderr,"oroLogFull: expand full_string by ret val of vsnprintf\n");
+            size_t need = n  -  ENTRY->full_string_len  ;
+            /*
+            * round mem to pagesize?
+            */
+            size_t new_size = (((ENTRY->full_string_len + need + 1)/sizeof(uintptr_t)) + 1)*sizeof(uintptr_t);
             char *t = aligned_alloc(sizeof (uintptr_t), new_size);
-            assert_msg(t != NULL,"Obj buf expand aligned_alloc failed");
-            buf = t;
+            assert_msg(t != NULL,"oroLogFull buf expand aligned_alloc failed");
+            free(ENTRY->full_string);
+            ENTRY->full_string = t;
+            ENTRY->full_string_len=new_size;
             expecting_byte = new_size;
         } else {
             break;
@@ -2427,11 +1999,12 @@ size_t oroLogFulla(Poro_t logFile, size_t expecting_byte, const char* format,  .
 
     } while (1);
     
-    assert_msg(n>0, "something wrong with vsnprintf");
+    assert_msg(n>0, "negative n means something wrong with vsnprintf");
     
-    ENTRY->format_string=buf;
     
-    ENTRY->num = -1; // need FREE on `format_string`
+    ENTRY->format_string=NULL;
+    
+    ENTRY->num = -1; 
     
     ENTRY->params_free_mask=(uintptr_t)0;
     
@@ -2441,13 +2014,15 @@ size_t oroLogFulla(Poro_t logFile, size_t expecting_byte, const char* format,  .
     
     Q_NEXT_FENCE;
     
-    
+    if(LOG->withlock) pthread_spin_lock(&(Q->insert_lock));
     
     Q->head->next=ENTRY;
     Q->head=ENTRY;
-    Q->cnt_in+=1;
+    //Q->cnt_in+=1;
 
 
+    if(LOG->withlock) pthread_spin_unlock(&(Q->insert_lock));
+    
     return expecting_byte;
 }
 
