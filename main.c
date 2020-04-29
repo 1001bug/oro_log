@@ -169,14 +169,14 @@ int main(int argc, char** argv) {
 
     char *static_string_ptr = ">static_string_ptr<";
     Poro_t LOG = 0;
-    Poro_t LOG2= 0;
+    
     
     oro_attrs_t config={0};
     config.f_name_part1="out";
     
     //config.f_name_part3="output";
     config.path="";
-    //config.bufsize=81920;
+    config.bufsize=16384;
     //config.return_q=50000;
     
     config.truncate = 1;
@@ -184,16 +184,16 @@ int main(int argc, char** argv) {
     config.file_name_with_pid=0;
     //config.path="some";
     
-    //config.time_source=CLOCK_ID_MEASURE;
+    //config.time_source=CLOCK_ID_WALL;
     config.time_source=-1;
-    config.timestamp_utc = 1;
+    //config.timestamp_utc = 1;
     
     config.return_q=NN;
     
         
-    config.nospinlock=1;
+    config.nospinlock=0;
     
-    config.do_mlock=-1;
+    config.do_mlock=0;
     
     
     LOG = oroLogOpen(config,on_error_stderr);
@@ -204,9 +204,13 @@ int main(int argc, char** argv) {
 
     assert(LOG != 0);
     
-    config.f_name_part1="out_2";
-    config.return_q = 2000000;
-    config.bufsize=40960;
+    //config.f_name_part1="out_2";
+    //config.return_q = 2000000;
+    //config.bufsize=40960;
+    
+    Poro_t_unlocked LOG_u= 0;
+    //LOG_u = (Poro_t_unlocked)LOG;
+    LOG_u = LOG;
                    
     
     //pthread_attr_destroy(&morelog_pth_attrs_r);
@@ -232,13 +236,11 @@ int main(int argc, char** argv) {
     
     sleep(1);
     
-    pthread_t morelog_thread;
-    pthread_attr_t morelog_pth_attrs_r;
+    //pthread_t morelog_thread;
+    //pthread_attr_t morelog_pth_attrs_r;
     
-    pthread_attr_init(&morelog_pth_attrs_r);
+    //pthread_attr_init(&morelog_pth_attrs_r);
 
-    if(0)
-        pthread_create(&morelog_thread, &morelog_pth_attrs_r, threaded_log_actions, &LOG2);
     
     
     
@@ -290,7 +292,7 @@ int main(int argc, char** argv) {
     oroLogRelaxedA(LOG, "oroLogRelaxed WRONG  entry str='%s' %u with TIME=%li%09li anf current sec number %l................. " ,">str<",1,2,3);
     oroLogRelaxed_XA(LOG, "oroLogRelaxed WRONG  entry str='%s' %u with TIME=%li%09li anf current sec number %l................. " ,">str<",1,2,3);
     oroLogFull(LOG, 25, "oroLogRelaxed WRONG  entry str='%s' %u with TIME=%li%09li anf current sec number %l ................ " ,">str<",1,2,3,4);
-    
+    oroLogFixed5_unlocked(LOG_u,"asasasas",0,0,0,0,0);
     
 //    logLogFixedA(LOG, "1ogLogFixed   entry str='s' u with TIME=li09li anf current sec number li an more over and so on llu:llu");
 
@@ -407,12 +409,12 @@ int main(int argc, char** argv) {
     
     
     
-    
+    //goto end;
     
     
     for (int r = 0; r < NN; r++) {
         RDTSCP(start);
-        oroLogFixed5_unlocked(LOG, "oroLogFixed5_unlocked   entry str='%s' %u with TIME=%li%09li anf current sec number %li an more over and so on llu:llu"
+        oroLogFixed5_unlocked(LOG_u, "oroLogFixed5_unlocked   entry str='%s' %u with TIME=%li%09li anf current sec number %li an more over and so on llu:llu"
                 ,(uintptr_t)__ASSERT_FUNCTION
                 ,(uintptr_t)NN
                 ,(uintptr_t)cur.tv_sec
@@ -426,6 +428,21 @@ int main(int argc, char** argv) {
     PRINT_STAT("oroLogFixed5_unlocked ", rdtscp_S, rdtscp_E, rdtscp_dif, NN, CYCLES);
     sleep(1);
     
+    for (int r = 0; r < NN; r++) {
+        RDTSCP(start);
+        oroLogFixed5_unlocked(LOG_u, "oroLogFixed5_unlocked   entry str='%s' %u with TIME=%li%09li anf current sec number %li an more over and so on llu:llu"
+                ,(uintptr_t)__ASSERT_FUNCTION
+                ,(uintptr_t)NN
+                ,(uintptr_t)cur.tv_sec
+                ,(uintptr_t)cur.tv_nsec
+                ,(uintptr_t)55<<10
+                //,start,cycles_in_one_usec
+                );
+        RDTSCP(rdtscp_E[r]);rdtscp_S[r]=start;
+        
+    }
+    PRINT_STAT("oroLogFixed5_unlocked ", rdtscp_S, rdtscp_E, rdtscp_dif, NN, CYCLES);
+    sleep(1);
     
 
     
@@ -618,7 +635,7 @@ int main(int argc, char** argv) {
     fflush(OUT);
     for (int r = 0; r < NN; r++) {
         RDTSCP(start);
-        fprintf(OUT, "fprintf         entry str='%s' %u with TIME=%li%09li anf current sec number %li an more over and so on %lu:%lu\n"
+        oroLogfprintf(LOG,OUT, "fprintf         entry str='%s' %u with TIME=%li%09li anf current sec number %li an more over and so on %lu:%lu\n"
                 ,static_string_ptr
                 ,NN
                 ,cur.tv_sec
@@ -628,7 +645,7 @@ int main(int argc, char** argv) {
                 );
         RDTSCP(rdtscp_E[r]);rdtscp_S[r]=start;
     }
-    PRINT_STAT("fprintf", rdtscp_S, rdtscp_E, rdtscp_dif, NN, CYCLES);
+    PRINT_STAT("oroLogfprintf", rdtscp_S, rdtscp_E, rdtscp_dif, NN, CYCLES);
     fflush(OUT);
     sleep(1);
 
@@ -724,12 +741,7 @@ end:
 
     return (EXIT_SUCCESS);
 }
-
-void PRINT_STAT(const char *name, uint64_t *time_S, uint64_t *time_E, uint64_t *time_Dif, int count, int ts_source) {
-
-
-
-    int cmpare(const void *a, const void *b) {
+int cmpare(const void *a, const void *b) {
 
         const uint64_t *ia = (const uint64_t *) a;
 
@@ -738,6 +750,11 @@ void PRINT_STAT(const char *name, uint64_t *time_S, uint64_t *time_E, uint64_t *
         return *ia - *ib;
 
     }
+void PRINT_STAT(const char *name, uint64_t *time_S, uint64_t *time_E, uint64_t *time_Dif, int count, int ts_source) {
+
+
+
+    
 
 
 

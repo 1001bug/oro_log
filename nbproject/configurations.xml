@@ -43,11 +43,12 @@
         <cTool>
           <architecture>2</architecture>
           <standard>3</standard>
-          <commandLine>-O0 -mavx</commandLine>
+          <commandlineTool>gcc</commandlineTool>
+          <commandLine>-O2 -mavx</commandLine>
           <warningLevel>2</warningLevel>
         </cTool>
         <linkerTool>
-          <commandLine>-pthread -lrt</commandLine>
+          <commandLine>-pthread</commandLine>
         </linkerTool>
       </compileType>
       <item path="/home/alex/NetBeansProjects/oro_log/oro_log.c"
@@ -83,6 +84,66 @@
         <asmTool>
           <developmentMode>5</developmentMode>
         </asmTool>
+      </compileType>
+      <item path="/home/alex/NetBeansProjects/oro_log/oro_log.c"
+            ex="false"
+            tool="0"
+            flavor2="0">
+      </item>
+      <item path="/home/alex/NetBeansProjects/oro_log/oro_log.h"
+            ex="false"
+            tool="3"
+            flavor2="0">
+      </item>
+      <item path="main.c" ex="false" tool="0" flavor2="0">
+      </item>
+    </conf>
+    <conf name="c_lang" type="1">
+      <toolsSet>
+        <compilerSet>CLANG|CLang</compilerSet>
+        <dependencyChecking>true</dependencyChecking>
+        <rebuildPropChanged>false</rebuildPropChanged>
+      </toolsSet>
+      <compileType>
+        <cTool>
+          <architecture>2</architecture>
+          <standard>3</standard>
+          <commandLine>-O2 -mavx</commandLine>
+          <warningLevel>2</warningLevel>
+        </cTool>
+        <linkerTool>
+          <commandLine>-pthread</commandLine>
+        </linkerTool>
+      </compileType>
+      <item path="/home/alex/NetBeansProjects/oro_log/oro_log.c"
+            ex="false"
+            tool="0"
+            flavor2="0">
+      </item>
+      <item path="/home/alex/NetBeansProjects/oro_log/oro_log.h"
+            ex="false"
+            tool="3"
+            flavor2="0">
+      </item>
+      <item path="main.c" ex="false" tool="0" flavor2="0">
+      </item>
+    </conf>
+    <conf name="c_lang40" type="1">
+      <toolsSet>
+        <compilerSet>CLang40|CLang</compilerSet>
+        <dependencyChecking>true</dependencyChecking>
+        <rebuildPropChanged>false</rebuildPropChanged>
+      </toolsSet>
+      <compileType>
+        <cTool>
+          <architecture>2</architecture>
+          <standard>3</standard>
+          <commandLine>-O2 -mavx</commandLine>
+          <warningLevel>2</warningLevel>
+        </cTool>
+        <linkerTool>
+          <commandLine>-pthread</commandLine>
+        </linkerTool>
       </compileType>
       <item path="/home/alex/NetBeansProjects/oro_log/oro_log.c"
             ex="false"

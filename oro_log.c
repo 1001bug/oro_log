@@ -323,7 +323,7 @@ static void *x_alloc_aligned_zeroed_locked (size_t __size, int must_mlock){
 static void *x_alloc_aligned_zeroed_locked_page (size_t __size, int must_mlock){
     
     size_t pagesize = getpagesize();
-    assert((pagesize % __size)==0);
+    assert((__size % pagesize)==0);
     
     void * ptr = aligned_alloc(pagesize, __size);
     assert( ((uintptr_t)ptr % pagesize) == 0);
@@ -1061,11 +1061,34 @@ static int logCleaup(void (*error_fun)(char *fstring,...)){
     
 }
 
+Poro_t_unlocked oroLogOpen_onlocked(oro_attrs_t config, void (*error_fun)(char *fstring,...)){
+    
+    //for unlocked version use separate fun
+    if(config.nospinlock == 0){
+        if(error_fun)error_fun(
+                ERR_MESSAGE("nospinlock must be 1\n",__func__)
+                );
+        return NULL;
+    }
+    config.nospinlock=-1;
+    Poro_t tmp = oroLogOpen(config,error_fun);
+    
+    return (Poro_t_unlocked)tmp;
+
+}
 
 Poro_t oroLogOpen(oro_attrs_t config, void (*error_fun)(char *fstring,...)){
     
 
     assert_msg(config.f_name_part1 !=NULL && strlen(config.f_name_part1)>0,"First part of file name MUST not be zero length");
+    
+    //for unlocked version use separate fun
+    if(config.nospinlock == 1){
+        if(error_fun)error_fun(
+                ERR_MESSAGE("nospinlock must be 0\n",__func__)
+                );
+        return NULL;
+    }
 
     
     if(config.return_q == 0)
@@ -1384,7 +1407,7 @@ Poro_t oroLogOpen(oro_attrs_t config, void (*error_fun)(char *fstring,...)){
     LOG->insert_forbidden = 1;
     
     //just for test. only Fixed and Relaxed is affected by lock. maybe make _unlocked fun var?
-    if(config.nospinlock == 1)
+    if(config.nospinlock == -1)
         LOG->withlock = 0;
     else
         LOG->withlock = 1;
@@ -1409,7 +1432,7 @@ Poro_t oroLogOpen(oro_attrs_t config, void (*error_fun)(char *fstring,...)){
     //the only exit point!!!!
     
     pthread_mutex_unlock(&FD_LIST_mutex);
-    return LOG;
+    return (Poro_t)LOG;
 
 logOpen__exit:    
     pthread_mutex_unlock(&FD_LIST_mutex);
@@ -1441,7 +1464,7 @@ static void logRedirect_stderr(Poro_t logFile, const char *funname, struct times
 
 
 
-void oroLogFixed5_unlocked(Poro_t logFile, const char* format, uintptr_t p1, uintptr_t p2, uintptr_t p3, uintptr_t p4, uintptr_t p5){
+void oroLogFixed5_unlocked(Poro_t_unlocked logFile, const char* format, uintptr_t p1, uintptr_t p2, uintptr_t p3, uintptr_t p4, uintptr_t p5){
     _Static_assert(PARAMS_FIXED_NUM >= 5, "oroLogFixed8 need 8 params to store");
     
     struct timespec time={0};
@@ -1458,7 +1481,7 @@ void oroLogFixed5_unlocked(Poro_t logFile, const char* format, uintptr_t p1, uin
     
 
     if(UNLIKELY(LOG->insert_forbidden == 1)){
-        logRedirect_stderr_f(logFile,__func__,time,format,p1,p2,p3,p4,p5);
+        logRedirect_stderr_f((Poro_t)logFile,__func__,time,format,p1,p2,p3,p4,p5);
         return;
     }
     
@@ -2051,4 +2074,52 @@ static int str_s_cpy(char *dest, const char *src, size_t sizeof_dest) {
     if (res)
         dest[res - 1] = '\0';
     return -1;
+}
+
+
+void oroLogfprintf(Poro_t logFile, FILE *File, const char* format,  ...){
+    va_list arglist;
+    struct timespec time={0};
+    //time_source is global
+    if(time_source>=0)
+        clock_gettime(time_source,&time);
+    
+    __builtin_prefetch((struct FD_LIST_ITEM *)logFile);
+    struct FD_LIST_ITEM *LOG=(struct FD_LIST_ITEM *)logFile;
+    
+    
+    //Do we need sanity check?
+    //assert_msg(LOG->withlock == 0, "Use oroLogFixed5_unlocked for LOG expecting locks");
+    
+
+    if(UNLIKELY(LOG->insert_forbidden == 1)){
+        
+        va_start(arglist, format);
+        logRedirect_stderr(logFile,__func__,time,format,arglist);
+        va_end(arglist);
+        
+        return;
+    }
+    
+    
+    
+    Q_element *ENTRY;
+    LOG_QUEUE *Q = &(LOG->QUEUE);
+    
+    //add some to Q if it is empty
+    if(UNLIKELY(Q->return_tail->next == NULL)){
+        //mLOCK after start is dangeruus!!!!
+        Q->return_tail=alloc_Q_list_inside_page(Q->return_tail,-1);
+        //fprintf(stderr,"RETURN Q EMPTY\n");
+    }
+    //not checking. Under lock it does not metter
+    //alloc_Q_list_inside_page does abort on problem with memory
+    ENTRY = Q->return_tail;
+
+    
+    va_start(arglist, format);
+    vfprintf(File,format,arglist);
+    va_end(arglist);
+    
+    ENTRY = NULL;
 }

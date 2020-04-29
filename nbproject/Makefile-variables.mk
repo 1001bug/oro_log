@@ -22,6 +22,22 @@ CND_ARTIFACT_PATH_Release=dist/Release/GNU-Linux/oro_log
 CND_PACKAGE_DIR_Release=dist/Release/GNU-Linux/package
 CND_PACKAGE_NAME_Release=orolog.tar
 CND_PACKAGE_PATH_Release=dist/Release/GNU-Linux/package/orolog.tar
+# c_lang configuration
+CND_PLATFORM_c_lang=CLANG-Linux
+CND_ARTIFACT_DIR_c_lang=dist/c_lang/CLANG-Linux
+CND_ARTIFACT_NAME_c_lang=oro_log
+CND_ARTIFACT_PATH_c_lang=dist/c_lang/CLANG-Linux/oro_log
+CND_PACKAGE_DIR_c_lang=dist/c_lang/CLANG-Linux/package
+CND_PACKAGE_NAME_c_lang=orolog.tar
+CND_PACKAGE_PATH_c_lang=dist/c_lang/CLANG-Linux/package/orolog.tar
+# c_lang40 configuration
+CND_PLATFORM_c_lang40=CLang40-Linux
+CND_ARTIFACT_DIR_c_lang40=dist/c_lang40/CLang40-Linux
+CND_ARTIFACT_NAME_c_lang40=oro_log
+CND_ARTIFACT_PATH_c_lang40=dist/c_lang40/CLang40-Linux/oro_log
+CND_PACKAGE_DIR_c_lang40=dist/c_lang40/CLang40-Linux/package
+CND_PACKAGE_NAME_c_lang40=orolog.tar
+CND_PACKAGE_PATH_c_lang40=dist/c_lang40/CLang40-Linux/package/orolog.tar
 #
 # include compiler specific variables
 #

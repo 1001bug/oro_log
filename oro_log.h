@@ -14,6 +14,9 @@
 #ifndef LOG_H
 #define LOG_H
 
+#include <stdint.h>
+
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -39,7 +42,18 @@ extern "C" {
 
 #endif    
     
-    typedef void * Poro_t;
+    //typedef void * Poro_t ;
+    //typedef uintptr_t Poro_t_unlocked;
+    //typedef void * Poro_t_unlocked;
+    
+    
+    typedef struct{
+        void *p;
+    } *Poro_t;
+    
+    typedef struct{
+        void *p;
+    } *Poro_t_unlocked;
 
     typedef struct {
         int file_name_with_date;
@@ -71,10 +85,11 @@ extern "C" {
     //variadic param length 7!
     #define PARAMS_FIXED_NUM 7
 
+    void oroLogfprintf(Poro_t logFile, FILE *File, const char* format,  ...);
 
-    void oroLogFixed5_unlocked(Poro_t logFile, const char* format, uintptr_t p1, uintptr_t p2, uintptr_t p3, uintptr_t p4, uintptr_t p5);
+    void oroLogFixed5_unlocked(Poro_t_unlocked logFile, const char* format, uintptr_t p1, uintptr_t p2, uintptr_t p3, uintptr_t p4, uintptr_t p5);
 
-    void oroLogFixed(Poro_t logFile, size_t NUM, const char* format, ...) __attribute__((nonnull (1, 3)));
+    void oroLogFixed(Poro_t logFile, size_t NUM, const char* format, ...);// __attribute__((nonnull (1, 3)));
     
     void oroLogRelaxed(Poro_t logFile, size_t NUM, const char* format, ...);
     void oroLogRelaxed_X(Poro_t logFile, size_t NUM, const char* format,  ...);
