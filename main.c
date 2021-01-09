@@ -185,7 +185,7 @@ int main(int argc, char** argv) {
     //config.path="some";
     
     //config.time_source=CLOCK_ID_WALL;
-    config.time_source=-1;
+    //config.time_source=-1;
     //config.timestamp_utc = 1;
     
     config.return_q=NN;
@@ -195,8 +195,10 @@ int main(int argc, char** argv) {
     
     config.do_mlock=0;
     
+    config.bind_cpu=2;
     
-    LOG = oroLogOpen(config,on_error_stderr);
+    oroInit(-1,0,on_error_stderr);
+    LOG = oroLogOpen(config);
     
     
     //int r = logOpen(&LOG, 0, "", "main", "A", on_error_stderr);
@@ -229,7 +231,7 @@ int main(int argc, char** argv) {
     //logFlush('R', 0, "2", on_error_stderr);
     
     
-    oroWriterStart(2, on_error_stderr);
+    //oroWriterStart(2);
     
     
     
@@ -698,7 +700,7 @@ end:
 
 
 
-    while(oroWriterStop(1000000, on_error_stderr) != 0){
+    while(oroWriterStop(1000000) != 0){
         fprintf(stderr,"Waiting for logFlush finish...\n");
     }
 

@@ -59,7 +59,7 @@ extern "C" {
         int file_name_with_date;
         int file_name_with_pid;
         int truncate;
-        int time_source; //global!!!
+        //int time_source; //global!!!
 
         char *path; //check for / on end
         char *f_name_part1;
@@ -68,13 +68,18 @@ extern "C" {
 
 
         int return_q; //def?? RETURN_QUANTITY
-        int timestamp_utc;
+        //int timestamp_utc; //global!!!
 
         size_t bufsize; //setvbuf
         int nospinlock; //1 - log file without locks (one thread print only)
         int do_mlock;  //mlock always? if 1 - exit on mlock fail
         
+        int bind_cpu; //-1 mean do not bind. valid 0..1024
+        
         char *internal_name;
+        
+        
+        
 
 
     } oro_attrs_t;
@@ -83,7 +88,8 @@ extern "C" {
     
 
     //variadic param length 7!
-    #define PARAMS_FIXED_NUM 7
+    //#define PARAMS_FIXED_NUM 7
+    #define PARAMS_FIXED_NUM 32
 
     void oroLogfprintf(Poro_t logFile, FILE *File, const char* format,  ...);
 
@@ -98,11 +104,13 @@ extern "C" {
 
     size_t oroLogFull(Poro_t logFile, size_t expecting_byte, const char* format,  ...);
     
-    void oroLogTruncate(Poro_t logFile); //все разом?
+    void oroLogTruncate(Poro_t logFile);
 
-    int oroWriterStart(int bind_cpu, void (*error_fun)(char *fstring, ...));
-    int oroWriterStop(__suseconds_t wait, void (*error_fun)(char *fstring, ...));
-    Poro_t oroLogOpen(oro_attrs_t config, void (*error_fun)(char *fstring, ...));
+    
+    int oroWriterStop(__suseconds_t wait);
+    Poro_t oroLogOpen(oro_attrs_t config);
+    
+    void oroInit(int time__source,int timestamp_utc,void (*error__fun)(char *fstring, ...));
 
     //Autocount args for N=1+  because some problem with ##__VA_ARGS__. In macro expand it everything ok, but in runtime 0 args gives count=1
 #define oroLogFixedA(logFile,format,...) do{ \

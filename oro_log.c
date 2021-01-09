@@ -149,7 +149,7 @@ extern const char *__progname;
 //hardcode for now. it is usual to sleep for 10 millisec
 static __suseconds_t logFlush_empty_queue_sleep = 10000; //sleep while autoflush
 static const int logFlush_fflush_sec = 1; //+sec to next fflush time
-static const long logFlush_lines_at_cycle=20000; //divide by nuber of log files
+//static const long logFlush_lines_at_cycle=20000; //divide by nuber of log files
 static long timezone_offset;
 //static unsigned long long cycles_in_one_usec = 1000000L; //защита от деления на ноль
 static struct timespec logOpenTime;
@@ -158,7 +158,7 @@ static int time_source = CLOCK_ID_WALL_FAST; //global. same for all logs
 static const size_t logLogFullBufLen = 1024;
 //not need any more
 //static unsigned long logQueueSize(Poro_t logFile, void (*error_fun)(char *fstring,...));
-
+void (*error_fun)(char *fstring, ...)=NULL;
 
 
 
@@ -194,7 +194,7 @@ static const uint8_t stop_tb[128] __attribute__ ((aligned(sizeof(uintptr_t)))) =
 
 //inernal use only, degerous!
 //static int logCleaup();
-static int logCleaup(void (*error_fun)(char *fstring,...));
+static int logCleaup();
 static void logRedirect_stderr(Poro_t logFile, const char *funname, struct timespec time, const char* format, va_list ap);
 //пока тут. куда дальше ее сунуть не знаю
 static int str_s_cpy(char *dest, const char *src, size_t sizeof_dest);
@@ -202,18 +202,18 @@ static int str_s_cpy(char *dest, const char *src, size_t sizeof_dest);
 static void *x_alloc_aligned_zeroed_locked (size_t __size, int must_mlock);
 static void *x_alloc_aligned_zeroed_locked_page (size_t __size, int must_mlock);
 
-static volatile int requestForLogsTruncate = 0;
+//static volatile int requestForLogsTruncate = 0;
 
 
 
 typedef struct Q_element{
     struct timespec realtime;
-    struct timespec monotime;
+    //struct timespec monotime;
     const char *format_string;
     char *full_string;
     uintptr_t params[PARAMS_FIXED_NUM];
     //uintptr_t *params;
-    void *params_p;
+    //void *params_p;
     uintptr_t params_free_mask;
     size_t full_string_len;
     int num;
@@ -268,6 +268,11 @@ struct FD_LIST_ITEM{
     
     char *log_filename;
     
+    pthread_t logFlushThread;
+    int logFlushThreadStarted;
+    int requestForLogsTruncate;
+    
+    
 } __attribute__ ((aligned(sizeof(uintptr_t)))); 
 
 static struct FD_LIST_ITEM *FD_LIST = NULL;
@@ -276,9 +281,9 @@ static volatile int FD_LIST_ITEM_NUM = 0;
 static pthread_mutex_t FD_LIST_mutex = PTHREAD_MUTEX_INITIALIZER;
 
 
-static pthread_t af_thread = 0;
+//static pthread_t af_thread = 0;
 static pthread_mutex_t af_thread_startup_mutex = PTHREAD_MUTEX_INITIALIZER;
-static volatile long logFlushThreadStarted = 0;
+//static volatile long logFlushThreadStarted = 0;
 
 
 
@@ -289,7 +294,8 @@ static volatile long logFlushThreadStarted = 0;
 
 
 void oroLogTruncate(Poro_t logFile){
-    requestForLogsTruncate=1;
+    struct FD_LIST_ITEM *LOG=(struct FD_LIST_ITEM *)logFile;
+    LOG->requestForLogsTruncate=1;
     return;
 }
 
@@ -372,12 +378,32 @@ static Q_element * alloc_Q_list_inside_page(Q_element * tail, int lock) {
     return Q_e_ptr;
 }
 
-static void * logWrite_thread(void *e_fun){
+void oroInit(int time__source,int timestamp_utc,void (*error__fun)(char *fstring, ...)){
+    //global vars
+    time_source=time__source;
+    error_fun=error__fun;
+    
+    //нужно для даты в имени файла
+    if(timestamp_utc != 1){
+        struct tm *l_time=NULL;
+        time_t t = time(NULL);
+        l_time = localtime(&t);
+        assert_msg(l_time != NULL, "localtime FAILed");
+
+        timezone_offset=l_time->tm_gmtoff;
+    }
+    
+    
+}
+
+//individual thread for each LOG
+static void * logWrite_thread(void *logFile){
     //__suseconds_t usec_sleep = *(__suseconds_t *) S;
     __suseconds_t usec_sleep = logFlush_empty_queue_sleep ; //GLOBAL
     
+    struct FD_LIST_ITEM *LOG=(struct FD_LIST_ITEM *)logFile;
     
-    void (*error_fun)(char *fstring,...) = e_fun;
+    //void (*error_fun)(char *fstring,...) = e_fun;
     
     char DATE_FORMAT_STRING[] __attribute__ ((aligned(sizeof(uintptr_t))))=      "00:00:00.000000000;;";
     const char date_format_string[] __attribute__ ((aligned(sizeof(uintptr_t))))="%02i:%02i:%02i.%%09li;;";
@@ -392,59 +418,55 @@ static void * logWrite_thread(void *e_fun){
     
     //forbiden add new log files from thist point
     
-    pthread_mutex_lock(&FD_LIST_mutex);
+    //pthread_mutex_lock(&FD_LIST_mutex);
 
 
-    if (FD_LIST == NULL || FD_LIST_ITEM_NUM == 0) {
+    if (LOG == NULL) {
 
         //go to exit
         pthread_mutex_unlock(&af_thread_startup_mutex);
         goto logFlush_thread__exit;
     }
     
+    //activate logs
+    LOG->insert_forbidden = 0;
     
-    //activate all logs
-    for (struct FD_LIST_ITEM * L=FD_LIST;L;L=L->next) {
-        L->insert_forbidden = 0;
-    }
     
-    logFlushThreadStarted=1;
+    LOG->logFlushThreadStarted=1;
     pthread_mutex_unlock(&af_thread_startup_mutex);
     
     //ready to exit counter (+3 time get state: write=0 and all files are locked)
     int ready_to_exit = 0;
     
-    
+    //endless check and write
     for(;;) {
-        //has total limit of writes. divide by num of files
-        const long logFlush_lines_each_file = logFlush_lines_at_cycle / FD_LIST_ITEM_NUM;
-
+        
         
 
-        if (UNLIKELY(requestForLogsTruncate)) {
-            requestForLogsTruncate = 0;
-            for (struct FD_LIST_ITEM * LOG=FD_LIST;LOG;LOG=LOG->next) {
-                FILE *F = LOG->FD;
+        if (UNLIKELY(LOG->requestForLogsTruncate)) {
+            LOG->requestForLogsTruncate = 0;
+            
+            FILE *F = LOG->FD;
 
-                if (F) {
-                    //такойспособ не обнуляет блокировку файла
+            if (F) {
+                //такойспособ не обнуляет блокировку файла
+                errno = 0;
+                if (fseek(F, 0, SEEK_SET) != 0) {
+                    if(error_fun)
+                        error_fun(ERR_MESSAGE("Log Truncate failed (rewind): %s\n", strerror(errno)));
+                    LOG->insert_forbidden = 1;
+                } else {
                     errno = 0;
-                    if (fseek(F, 0, SEEK_SET) != 0) {
+                    if (ftruncate(fileno(F), 0) != 0) {
                         if(error_fun)
-                            error_fun(ERR_MESSAGE("Log Truncate failed (rewind): %s\n", strerror(errno)));
+                            error_fun(ERR_MESSAGE("Log Truncate failed (trunc): %s\n", strerror(errno)));
+
                         LOG->insert_forbidden = 1;
-                    } else {
-                        errno = 0;
-                        if (ftruncate(fileno(F), 0) != 0) {
-                            if(error_fun)
-                                error_fun(ERR_MESSAGE("Log Truncate failed (trunc): %s\n", strerror(errno)));
-                            
-                            LOG->insert_forbidden = 1;
-                        }
                     }
                 }
-
             }
+
+            
         }
 
         //счетчик того сколько всесего записей сделано по всем файлам. если ни одной, то значит ничего не происходит, поспим немного
@@ -453,7 +475,7 @@ static void * logWrite_thread(void *e_fun){
 
         
         
-        for (struct FD_LIST_ITEM * LOG=FD_LIST;LOG;LOG=LOG->next) {
+
             __time_t prev_sec=0;
             int hr=0;
             int min=0;
@@ -469,7 +491,7 @@ static void * logWrite_thread(void *e_fun){
             LOG_QUEUE *Q = &(LOG->QUEUE);
 
             //счетчик чтобы в каждый файл писать по немного
-            long write_limit_cnt = 0;
+            //long write_limit_cnt = 0;
             //Если актуальный и не пустой  и за раз не больше 10000
             
             
@@ -477,8 +499,7 @@ static void * logWrite_thread(void *e_fun){
             while ( LIKELY(F != NULL) 
                     && 
                     Q->tail->next != NULL
-                    &&
-                    write_limit_cnt < logFlush_lines_each_file) {
+                    ) {
 
 
 
@@ -554,7 +575,7 @@ static void * logWrite_thread(void *e_fun){
                 
                 switch (E->num) {
 
-                    case -1: //E->num == -1 means logLogFull and we need free on format_string
+                    case -1: //E->num == -1 means logLogFull
                     {
                         
                         fputs_unlocked(E->full_string, F);
@@ -562,7 +583,7 @@ static void * logWrite_thread(void *e_fun){
 
                     }
                         
-                    case 0: //print static string wo any params
+                    case 0: //print static string without any params (call to Fixed/Relaxed with NUM=0)
                     {
                         fputs_unlocked(E->format_string, F);
 
@@ -570,12 +591,12 @@ static void * logWrite_thread(void *e_fun){
                         break;
                     }
 
-                    default: // print w params
+                    default: // print with params
                     {
                         uintptr_t *p = E->params;
 
                         //COMPILLE TIME limit on params number
-                        _Static_assert(PARAMS_FIXED_NUM < 33, "HARCODED MAXIMUM FOR PARAMS_FIXED_NUM IS 24");
+                        _Static_assert(PARAMS_FIXED_NUM < 33, "HARCODED MAXIMUM FOR PARAMS_FIXED_NUM IS 32");
 
 
                         fprintf(F, E->format_string,
@@ -703,7 +724,7 @@ static void * logWrite_thread(void *e_fun){
                 //check io errors on every second fflush()
                 
                 
-                write_limit_cnt++;
+                //write_limit_cnt++;
                 write_cnt++;
 
                 
@@ -717,31 +738,31 @@ static void * logWrite_thread(void *e_fun){
                 //Q->cnt_out+=1;
 
             }//while
-        }//for N
+
         
-        if(insert_forbidden_FD == FD_LIST_ITEM_NUM && write_cnt == 0){
-            //может какой счетчик добавить? с 3-го раза на выход?
-            ready_to_exit+=1;
-            if(ready_to_exit>1)
-                goto logFlush_thread__exit;
-            //возможно комбо при котором набо обнлить ready_to_exit?
-        }
         
-        //прошлись по всем файлам но ни одной записи? спать!
+        
+        //ни одной записи? exit или спать!
         if (write_cnt == 0) {
             
-            //for (int N = 0; N < FD_LIST_ITEM_NUM; N++)                fputs_unlocked("#sleep\n",FD_ARR[N].FD);
-            if(logFlush_empty_queue_sleep){
-            //замер времени 
-            pthread_yield();
-            //замер времени 
-            //если прошло слишком мало, то SLEEP 
-            //можно вычесть проведенное время в pthread_yield из usec_sleep
+            if(LOG->insert_forbidden == 1){
+                ready_to_exit+=1;
+                if(ready_to_exit>1)
+                    goto logFlush_thread__exit;
+            //возможно комбо при котором набо обнлить ready_to_exit?
+            }
             
+            
+            pthread_yield();
+            
+            //for (int N = 0; N < FD_LIST_ITEM_NUM; N++)                fputs_unlocked("#sleep\n",FD_ARR[N].FD);
+            if(usec_sleep){ //? почему тут не локальная usec_sleep а глобальная????
             
             struct timeval sleep_timeout={0,usec_sleep};
             
             select(0,NULL,NULL,NULL,&sleep_timeout);
+            //may end erlier then sleep_timeout in case of interrupt...
+            
             }
             
 
@@ -758,20 +779,20 @@ static void * logWrite_thread(void *e_fun){
             
         }*/
         if (Flush.tv_sec > prevFlush.tv_sec) { //HARDCODE flsuh every 1 sec
-            for (struct FD_LIST_ITEM * LOG = FD_LIST; LOG; LOG = LOG->next) {
-                if (LOG->FD != NULL) {
-                    errno = 0;
-                    fputs_unlocked("#fflush\n", LOG->FD);
+            
+            if (LOG->FD != NULL) {
+                errno = 0;
+                fputs_unlocked("#fflush\n", LOG->FD);
 
-                    fflush_unlocked(LOG->FD);
-                    if (errno) {
-                        if (error_fun)
-                            error_fun(
-                                ERR_MESSAGE("fflush on %s: %s\n", LOG->log_filename, strerror(errno))
-                                );
-                    }
+                fflush_unlocked(LOG->FD);
+                if (errno) {
+                    if (error_fun)
+                        error_fun(
+                            ERR_MESSAGE("fflush on %s: %s\n", LOG->log_filename, strerror(errno))
+                            );
                 }
             }
+            
             prevFlush.tv_sec = Flush.tv_sec + logFlush_fflush_sec;
         }
         
@@ -783,18 +804,18 @@ static void * logWrite_thread(void *e_fun){
 
     //the only return point!!!
 logFlush_thread__exit:
-    logFlushThreadStarted=0;
-    pthread_mutex_unlock(&FD_LIST_mutex);
+    LOG->logFlushThreadStarted=0;
+    //pthread_mutex_unlock(&FD_LIST_mutex);
     
     return NULL;
 }
 
-int oroWriterStart(int bind_cpu, void (*error_fun)(char *fstring, ...)) {
+static int logWriterStart(struct FD_LIST_ITEM *LOG, int bind_cpu) {
     pthread_attr_t af_pth_attrs_r;
     
     
     
-    if(logFlushThreadStarted){
+    if(LOG->logFlushThreadStarted){
         if (error_fun)error_fun(
                 ERR_MESSAGE("logFlush restart attempt\n")
                 );
@@ -841,7 +862,7 @@ int oroWriterStart(int bind_cpu, void (*error_fun)(char *fstring, ...)) {
     assert(af_thread_startup_mutex_lock == 0);
     //&logFlush_empty_queue_sleep
     int r = 0;
-    if ((r=pthread_create(&af_thread, &af_pth_attrs_r, logWrite_thread, error_fun)) != 0) {
+    if ((r=pthread_create(&(LOG->logFlushThread), &af_pth_attrs_r, logWrite_thread, LOG)) != 0) {
         if (error_fun)error_fun(
                 ERR_MESSAGE("pthread_create logFlush_thread error %i: %s\n", r, strerror(r))
                 );
@@ -857,7 +878,7 @@ int oroWriterStart(int bind_cpu, void (*error_fun)(char *fstring, ...)) {
     
     pthread_mutex_unlock(&af_thread_startup_mutex);
     
-    if(logFlushThreadStarted != 1){
+    if(LOG->logFlushThreadStarted != 1){
         if (error_fun)error_fun(
                 ERR_MESSAGE("FILE %s, LINE %i, logFlush start failed")
                 );
@@ -877,7 +898,7 @@ int oroWriterStart(int bind_cpu, void (*error_fun)(char *fstring, ...)) {
 
     {
         int r = 0;
-        if ((r = pthread_setname_np(af_thread, "logFlush")) != 0) {
+        if ((r = pthread_setname_np(LOG->logFlushThread, "logFlush")) != 0) {
             if (error_fun)error_fun(
                     ERR_MESSAGE("pthread_setname_np for logAutoflush_thread error %i: %s\n", r, strerror(r))
                     );
@@ -889,7 +910,7 @@ int oroWriterStart(int bind_cpu, void (*error_fun)(char *fstring, ...)) {
 
 }
 
-int oroWriterStop(long int wait_usec, void (*error_fun)(char *fstring,...)){
+int oroWriterStop(long int wait_usec){
 
     //check for logFlushThreadStarted=1 ????
 
@@ -897,6 +918,7 @@ int oroWriterStop(long int wait_usec, void (*error_fun)(char *fstring,...)){
 
     
 
+        pthread_mutex_lock(&FD_LIST_mutex);
 
         for (struct FD_LIST_ITEM * LOG=FD_LIST;LOG;LOG=LOG->next) {
             LOG->insert_forbidden = 1;
@@ -904,7 +926,15 @@ int oroWriterStop(long int wait_usec, void (*error_fun)(char *fstring,...)){
 
 
 
-        while (pthread_mutex_trylock(&FD_LIST_mutex) != 0) {
+        //rewrite mutex use!!!
+        for(;;) {
+            int still_running=0;
+            for (struct FD_LIST_ITEM * LOG=FD_LIST;LOG;LOG=LOG->next) {
+                still_running+=LOG->logFlushThreadStarted;
+            }
+            if(still_running==0)
+                break;
+            
 
             if (wait != 0) {
                 //если задана пауза - ждать один раз и обнулить ее. на след. круг сразу выйдем с -1
@@ -918,13 +948,18 @@ int oroWriterStop(long int wait_usec, void (*error_fun)(char *fstring,...)){
         //logFlush thread already finish (on exit it should unlock FD_ARR_mutex)
 
         //join наверно лишне, но вдруг там какая-то чистка делается, надо уточнить
-        int r=0;
-        if ((r=pthread_join(af_thread, NULL)) != 0) {
-            if (error_fun)error_fun(
-                    ERR_MESSAGE("pthread_join to logFlush_thread error %i: %s\n",r, strerror(r))
-                    );
-            //continue, not fatal
-            //may be not statrted
+        for (struct FD_LIST_ITEM * LOG = FD_LIST; LOG; LOG = LOG->next) {
+
+            if (LOG->logFlushThread != 0) {
+                int r = 0;
+                if ((r = pthread_join(LOG->logFlushThread, NULL)) != 0) {
+                    if (error_fun)error_fun(
+                            ERR_MESSAGE("pthread_join to logFlush_thread error %i: %s\n", r, strerror(r))
+                            );
+                    //continue, not fatal
+                    //may be not statrted
+                }
+            }
         }
         
         //Close all FD, free Q, io_buf, ...
@@ -955,8 +990,8 @@ static unsigned long logQueueSize(Poro_t logFile, void (*error_fun)(char *fstrin
 
 
 //DANGER!! ACHTUNG!!! shuold be called ONLY from logWriteSTOP
-static int logCleaup(void (*error_fun)(char *fstring,...)){ 
-    
+static int logCleaup(){ 
+    //expect FD_LIST_mutext is locked!!!!
     
     for (struct FD_LIST_ITEM * LOG=FD_LIST;LOG;LOG=LOG->next) {
             //FILE *F = FD_ARR[N].FD;
@@ -1061,7 +1096,7 @@ static int logCleaup(void (*error_fun)(char *fstring,...)){
     
 }
 
-Poro_t_unlocked oroLogOpen_onlocked(oro_attrs_t config, void (*error_fun)(char *fstring,...)){
+Poro_t_unlocked oroLogOpen_onlocked(oro_attrs_t config){
     
     //for unlocked version use separate fun
     if(config.nospinlock == 0){
@@ -1071,13 +1106,13 @@ Poro_t_unlocked oroLogOpen_onlocked(oro_attrs_t config, void (*error_fun)(char *
         return NULL;
     }
     config.nospinlock=-1;
-    Poro_t tmp = oroLogOpen(config,error_fun);
+    Poro_t tmp = oroLogOpen(config);
     
     return (Poro_t_unlocked)tmp;
 
 }
 
-Poro_t oroLogOpen(oro_attrs_t config, void (*error_fun)(char *fstring,...)){
+Poro_t oroLogOpen(oro_attrs_t config){
     
 
     assert_msg(config.f_name_part1 !=NULL && strlen(config.f_name_part1)>0,"First part of file name MUST not be zero length");
@@ -1108,12 +1143,14 @@ Poro_t oroLogOpen(oro_attrs_t config, void (*error_fun)(char *fstring,...)){
     //первый логфайл
     //int mtx = pthread_mutex_lock(&FD_ARR_mutex);
     
-    //если запущен тред записи на диск, не блокировать вызывающиц тред, а вернуть ошибку
+    
     //как быть с возможно параллельным запуском LogOpen?
+    //сменить try на просто lock (все вроде так сделано что просто работа с FD_LIST терьует lock. и только на время.
+    //так что смело можно менять try на просто lock
     int mtx = pthread_mutex_trylock(&FD_LIST_mutex);
     if(mtx != 0){
         if(error_fun)error_fun(
-                ERR_MESSAGE("Looks like flush thread already running or parallel LogOpen()\n")
+                ERR_MESSAGE("Looks like running LogOpen() in parallel\n")
                 );
         return NULL;
     }
@@ -1164,8 +1201,8 @@ Poro_t oroLogOpen(oro_attrs_t config, void (*error_fun)(char *fstring,...)){
         assert_msg(br_dw_time != NULL, "localtime FAILed");
 
         //нужно потом, для правильной печати даты
-        if(config.timestamp_utc != 1)
-            timezone_offset=br_dw_time->tm_gmtoff;
+        //if(config.timestamp_utc != 1)
+        //    timezone_offset=br_dw_time->tm_gmtoff;
     
 
         
@@ -1385,7 +1422,7 @@ Poro_t oroLogOpen(oro_attrs_t config, void (*error_fun)(char *fstring,...)){
     
     
     
-    fprintf(t,"# File opened. time_source %i, timestamp_utc %i, bufsize %zi, return_q %i\n",config.time_source,config.timestamp_utc,config.bufsize,config.return_q);
+    fprintf(t,"# File opened. time_source %i, timezone_offset %li, bufsize %zi, return_q %i\n",time_source,timezone_offset,config.bufsize,config.return_q);
         
    
     LOG->FD=t;
@@ -1400,7 +1437,7 @@ Poro_t oroLogOpen(oro_attrs_t config, void (*error_fun)(char *fstring,...)){
     //LOG->timestamp_utc=config.timestamp_utc;
     
     
-    time_source=config.time_source;
+    //time_source=config.time_source;
     
     
     //until logFlush starts
@@ -1422,12 +1459,21 @@ Poro_t oroLogOpen(oro_attrs_t config, void (*error_fun)(char *fstring,...)){
     }
     else{
 
-        FD_LIST->next=LOG;
+        struct FD_LIST_ITEM * F = FD_LIST;
+        while(F->next)
+            F = F->next;
+        //mistake????   should be `last next`=LOG
+        F->next=LOG;
         FD_LIST_ITEM_NUM+=1;
         
     }//realloc
     
     
+    if(logWriterStart(LOG,config.bind_cpu)!=0){
+        //at oroStop check failed threadns by logFlushThread==0
+        LOG->logFlushThread=0;
+        goto logOpen__exit;
+    }
     
     //the only exit point!!!!
     
@@ -1525,7 +1571,8 @@ void oroLogFixed5_unlocked(Poro_t_unlocked logFile, const char* format, uintptr_
     ENTRY->realtime = time;
     ENTRY->next=NULL;
     
-    Q_NEXT_FENCE;
+//    Q_NEXT_FENCE;
+    //__sync_synchronize();
     
     
     
@@ -1582,7 +1629,7 @@ void oroLogFixed(Poro_t logFile, size_t NUM, const char* format,  ...){
     
 //несколько тредов будут разбирать список, нужна блокировка. это конечно неахти
   
-    if(LOG->withlock) pthread_spin_lock(&(Q->insert_lock));
+    /*if(LOG->withlock) */pthread_spin_lock(&(Q->insert_lock));
     
     //add some to Q if it is empty
     if(UNLIKELY(Q->return_tail->next == NULL)){
@@ -1596,7 +1643,7 @@ void oroLogFixed(Poro_t logFile, size_t NUM, const char* format,  ...){
     Q->return_tail = Q->return_tail->next;
     
 
-    if(LOG->withlock) pthread_spin_unlock(&(Q->insert_lock));
+    /*if(LOG->withlock) */pthread_spin_unlock(&(Q->insert_lock));
    
     
     //MFENCE;
@@ -1614,6 +1661,146 @@ void oroLogFixed(Poro_t logFile, size_t NUM, const char* format,  ...){
     for(int num = 0 ; num <NUM ; num++) {
         p[num] = va_arg(arglist,uintptr_t);
     }
+    
+    /*switch(NUM){
+
+#if PARAMS_FIXED_NUM > 32
+FATAL CONFIG  ERROR!!!!  PARAMS_FIXED_NUM > 32  !!!!!
+#endif
+        
+        
+#if PARAMS_FIXED_NUM > 31
+        case 32:
+            p[31]=va_arg(arglist,uintptr_t);
+#endif
+#if PARAMS_FIXED_NUM > 30
+        case 31:
+            p[30]=va_arg(arglist,uintptr_t);
+#endif
+#if PARAMS_FIXED_NUM > 29
+        case 30:
+            p[29]=va_arg(arglist,uintptr_t);
+#endif
+#if PARAMS_FIXED_NUM > 28
+        case 29:
+            p[28]=va_arg(arglist,uintptr_t);
+#endif
+#if PARAMS_FIXED_NUM > 27
+        case 28:
+            p[27]=va_arg(arglist,uintptr_t);
+#endif
+#if PARAMS_FIXED_NUM > 26
+        case 27:
+            p[26]=va_arg(arglist,uintptr_t);
+#endif
+#if PARAMS_FIXED_NUM > 25
+        case 26:
+            p[25]=va_arg(arglist,uintptr_t);
+#endif
+#if PARAMS_FIXED_NUM > 24
+        case 25:
+            p[24]=va_arg(arglist,uintptr_t);
+#endif
+#if PARAMS_FIXED_NUM > 23
+        case 24:
+            p[23]=va_arg(arglist,uintptr_t);
+#endif
+#if PARAMS_FIXED_NUM > 22
+        case 23:
+            p[22]=va_arg(arglist,uintptr_t);
+#endif
+#if PARAMS_FIXED_NUM > 21
+        case 22:
+            p[21]=va_arg(arglist,uintptr_t);
+#endif
+#if PARAMS_FIXED_NUM > 20
+        case 21:
+            p[20]=va_arg(arglist,uintptr_t);
+#endif
+#if PARAMS_FIXED_NUM > 19
+        case 20:
+            p[19]=va_arg(arglist,uintptr_t);
+#endif
+#if PARAMS_FIXED_NUM > 18
+        case 19:
+            p[18]=va_arg(arglist,uintptr_t);
+#endif
+#if PARAMS_FIXED_NUM > 17
+        case 18:
+            p[17]=va_arg(arglist,uintptr_t);
+#endif
+#if PARAMS_FIXED_NUM > 16
+        case 17:
+            p[16]=va_arg(arglist,uintptr_t);
+#endif
+#if PARAMS_FIXED_NUM > 15
+        case 16:
+            p[15]=va_arg(arglist,uintptr_t);
+#endif
+#if PARAMS_FIXED_NUM > 14
+        case 15:
+            p[14]=va_arg(arglist,uintptr_t);
+#endif
+#if PARAMS_FIXED_NUM > 13
+        case 14:
+            p[13]=va_arg(arglist,uintptr_t);
+#endif
+#if PARAMS_FIXED_NUM > 12
+        case 13:
+            p[12]=va_arg(arglist,uintptr_t);
+#endif
+#if PARAMS_FIXED_NUM > 11
+        case 12:
+            p[11]=va_arg(arglist,uintptr_t);
+#endif
+#if PARAMS_FIXED_NUM > 10
+        case 11:
+            p[10]=va_arg(arglist,uintptr_t);
+#endif
+#if PARAMS_FIXED_NUM > 9
+        case 10:
+            p[9]=va_arg(arglist,uintptr_t);
+#endif
+#if PARAMS_FIXED_NUM > 8
+        case 9:
+            p[8]=va_arg(arglist,uintptr_t);
+#endif
+#if PARAMS_FIXED_NUM > 7
+        case 8:
+            p[7]=va_arg(arglist,uintptr_t);
+#endif
+#if PARAMS_FIXED_NUM > 6
+        case 7:
+            p[6]=va_arg(arglist,uintptr_t);
+#endif
+#if PARAMS_FIXED_NUM > 5
+        case 6:
+            p[5]=va_arg(arglist,uintptr_t);
+#endif
+#if PARAMS_FIXED_NUM > 4
+        case 5:
+            p[4]=va_arg(arglist,uintptr_t);
+#endif
+#if PARAMS_FIXED_NUM > 3
+        case 4:
+            p[3]=va_arg(arglist,uintptr_t);
+#endif
+#if PARAMS_FIXED_NUM > 2
+        case 3:
+            p[2]=va_arg(arglist,uintptr_t);
+#endif
+#if PARAMS_FIXED_NUM > 1
+        case 2:
+            p[1]=va_arg(arglist,uintptr_t);
+#endif
+#if PARAMS_FIXED_NUM > 0
+        case 1:
+            p[0]=va_arg(arglist,uintptr_t);
+#endif
+        case 0:
+        default:
+            break;
+    }*/
     va_end(arglist);
     
     ENTRY->format_string = format;
@@ -1623,16 +1810,16 @@ void oroLogFixed(Poro_t logFile, size_t NUM, const char* format,  ...){
     ENTRY->realtime = time;
     ENTRY->next=NULL;
     
-    Q_NEXT_FENCE;
+//    Q_NEXT_FENCE;
     
-    if(LOG->withlock) pthread_spin_lock(&(Q->insert_lock));
+    /*if(LOG->withlock) */pthread_spin_lock(&(Q->insert_lock));
     
     /*next!*/
     Q->head->next=ENTRY;
     Q->head=ENTRY;
     //Q->cnt_in+=1;
     
-    if(LOG->withlock) pthread_spin_unlock(&(Q->insert_lock));
+    /*if(LOG->withlock) */pthread_spin_unlock(&(Q->insert_lock));
     
     
 }
@@ -1668,7 +1855,7 @@ void oroLogRelaxed(Poro_t logFile, size_t NUM, const char* format,  ...) {
     Q_element *ENTRY;
     LOG_QUEUE *Q = &(LOG->QUEUE);
     
-    if(LOG->withlock) pthread_spin_lock(&(Q->insert_lock));
+    /*if(LOG->withlock) */pthread_spin_lock(&(Q->insert_lock));
     
     //add some to Q if it is empty
     if(UNLIKELY(Q->return_tail->next == NULL)){
@@ -1681,7 +1868,7 @@ void oroLogRelaxed(Poro_t logFile, size_t NUM, const char* format,  ...) {
     ENTRY = Q->return_tail;
     Q->return_tail = Q->return_tail->next;
     
-    if(LOG->withlock) pthread_spin_unlock(&(Q->insert_lock));
+    /*if(LOG->withlock) */pthread_spin_unlock(&(Q->insert_lock));
     
     //а нада?
     //assert_msg(ENTRY != NULL,"Got non valid Queue element pointer");
@@ -1767,15 +1954,15 @@ exit_parsing:
     ENTRY->realtime = time;
     ENTRY->next=NULL;
     
-    Q_NEXT_FENCE;
+//    Q_NEXT_FENCE;
     
-    if(LOG->withlock) pthread_spin_lock(&(Q->insert_lock));
+    /*if(LOG->withlock) */pthread_spin_lock(&(Q->insert_lock));
     
     Q->head->next=ENTRY;
     Q->head=ENTRY;
     //Q->cnt_in+=1;
 
-    if(LOG->withlock) pthread_spin_unlock(&(Q->insert_lock));
+    /*if(LOG->withlock) */pthread_spin_unlock(&(Q->insert_lock));
 
     
 }
@@ -1814,7 +2001,7 @@ void oroLogRelaxed_X(Poro_t logFile, size_t NUM, const char* format,  ...) {
     Q_element *ENTRY;
     LOG_QUEUE *Q = &(LOG->QUEUE);
     
-    if(LOG->withlock) pthread_spin_lock(&(Q->insert_lock));
+    /*if(LOG->withlock) */pthread_spin_lock(&(Q->insert_lock));
     
     //add some to Q if it is empty
     if(UNLIKELY(Q->return_tail->next == NULL)){
@@ -1827,7 +2014,7 @@ void oroLogRelaxed_X(Poro_t logFile, size_t NUM, const char* format,  ...) {
     ENTRY = Q->return_tail;
     Q->return_tail = Q->return_tail->next;
     
-    if(LOG->withlock) pthread_spin_unlock(&(Q->insert_lock));
+    /*if(LOG->withlock) */pthread_spin_unlock(&(Q->insert_lock));
         
     //а нада?
     //assert_msg(ENTRY != NULL,"Got non valid Queue element pointer");
@@ -1904,15 +2091,15 @@ exit_parsing:
     ENTRY->realtime = time;
     ENTRY->next=NULL;
     
-    Q_NEXT_FENCE;
+//    Q_NEXT_FENCE;
     
-    if(LOG->withlock) pthread_spin_lock(&(Q->insert_lock));
+    /*if(LOG->withlock) */pthread_spin_lock(&(Q->insert_lock));
     
     Q->head->next=ENTRY;
     Q->head=ENTRY;
     //Q->cnt_in+=1;
 
-    if(LOG->withlock) pthread_spin_unlock(&(Q->insert_lock));
+    /*if(LOG->withlock) */pthread_spin_unlock(&(Q->insert_lock));
 
     
 }
@@ -1959,7 +2146,7 @@ size_t oroLogFull(Poro_t logFile, size_t expecting_byte, const char* format,  ..
     Q = &(LOG->QUEUE);
 
     
-    if(LOG->withlock) pthread_spin_lock(&(Q->insert_lock));
+    /*if(LOG->withlock) */pthread_spin_lock(&(Q->insert_lock));
     
     //add some to Q if it is empty
     if(UNLIKELY(Q->return_tail->next == NULL)){
@@ -1972,7 +2159,7 @@ size_t oroLogFull(Poro_t logFile, size_t expecting_byte, const char* format,  ..
     ENTRY = Q->return_tail;
     Q->return_tail = Q->return_tail->next;
 
-    if(LOG->withlock) pthread_spin_unlock(&(Q->insert_lock));
+    /*if(LOG->withlock) */pthread_spin_unlock(&(Q->insert_lock));
       
     //а нада?
     //assert_msg(ENTRY != NULL,"Got non valid Queue element pointer");
@@ -2035,16 +2222,16 @@ size_t oroLogFull(Poro_t logFile, size_t expecting_byte, const char* format,  ..
     
     ENTRY->next=NULL;
     
-    Q_NEXT_FENCE;
+//    Q_NEXT_FENCE;
     
-    if(LOG->withlock) pthread_spin_lock(&(Q->insert_lock));
+    /*if(LOG->withlock) */pthread_spin_lock(&(Q->insert_lock));
     
     Q->head->next=ENTRY;
     Q->head=ENTRY;
     //Q->cnt_in+=1;
 
 
-    if(LOG->withlock) pthread_spin_unlock(&(Q->insert_lock));
+    /*if(LOG->withlock) */pthread_spin_unlock(&(Q->insert_lock));
     
     return expecting_byte;
 }
