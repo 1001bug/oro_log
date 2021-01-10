@@ -194,7 +194,7 @@ static const uint8_t stop_tb[128] __attribute__ ((aligned(sizeof(uintptr_t)))) =
 
 //inernal use only, degerous!
 //static int logCleaup();
-static int logCleaup();
+
 static void logRedirect_stderr(Poro_t logFile, const char *funname, struct timespec time, const char* format, va_list ap);
 //пока тут. куда дальше ее сунуть не знаю
 static int str_s_cpy(char *dest, const char *src, size_t sizeof_dest);
@@ -239,17 +239,17 @@ typedef struct LOG_Q {
     uint64_t cnt_in __attribute__ ((aligned));
     Q_element *head __attribute__ ((aligned));
     Q_element *return_tail __attribute__ ((aligned));
-    pthread_spinlock_t insert_lock __attribute__ ((aligned));
+    
     
     //sysconf(_SC_LEVEL3_CACHE_LINESIZE) = 64
-    char cache_line_pad1 [64 - sizeof(uint64_t) - sizeof(Q_element *) - sizeof(Q_element *) - sizeof(pthread_spinlock_t)]; 
+    char cache_line_pad1 [64 - sizeof(uint64_t) - sizeof(Q_element *) - sizeof(Q_element *) ]; 
     //char cache_line_pad1 [64 ];
     
     uint64_t cnt_out __attribute__ ((aligned));
     Q_element *tail __attribute__ ((aligned));
     Q_element *return_head __attribute__ ((aligned));
     
-    generic_list *free_list;
+    //generic_list *free_list;
     
     
 } LOG_QUEUE __attribute__ ((aligned));
@@ -257,28 +257,40 @@ typedef struct LOG_Q {
 
 struct FD_LIST_ITEM{
     FILE *FD;
+    
+    pthread_spinlock_t insert_lock __attribute__ ((aligned));
     LOG_QUEUE QUEUE  __attribute__ ((aligned(sizeof(uintptr_t))));;
-    char *custom_io_buf;
+    
+    
+    char cache_line_pad1 [(sizeof(FILE *) - sizeof(pthread_spinlock_t) - sizeof(LOG_QUEUE)) % 64]; 
+    
+    
+    pthread_mutex_t FD_LIST_ITEM_mutex;
+    pthread_t logFlushThread;
+    volatile int insert_forbidden __attribute__ ((aligned(sizeof(uintptr_t))));
+    volatile int requestForLogsTruncate; //write and read in many places
+    int logFlushThreadStarted; //write in Flush func only, other just read
+    
+    
+    
+    char *custom_io_buf __attribute__ ((aligned(sizeof(uintptr_t))));
     //clockid_t time_source; //usualy no reason to use different time source
     //int timestamp_utc;     //utc is for mononic time source
-    struct FD_LIST_ITEM *next;
-    int withlock;
     
-    volatile int insert_forbidden __attribute__ ((aligned(sizeof(uintptr_t))));
+    
+    
+    
+    
     
     char *log_filename;
-    
-    pthread_t logFlushThread;
-    int logFlushThreadStarted;
-    int requestForLogsTruncate;
     
     
 } __attribute__ ((aligned(sizeof(uintptr_t)))); 
 
-static struct FD_LIST_ITEM *FD_LIST = NULL;
-static volatile int FD_LIST_ITEM_NUM = 0;
+//static struct FD_LIST_ITEM *FD_LIST = NULL;
+//static volatile int FD_LIST_ITEM_NUM = 0;
 //lock FD_ARR. Block logOpen after log flusher start
-static pthread_mutex_t FD_LIST_mutex = PTHREAD_MUTEX_INITIALIZER;
+//static pthread_mutex_t FD_LIST_mutex = PTHREAD_MUTEX_INITIALIZER;
 
 
 //static pthread_t af_thread = 0;
@@ -287,7 +299,7 @@ static pthread_mutex_t af_thread_startup_mutex = PTHREAD_MUTEX_INITIALIZER;
 
 
 
-
+static int logCleaup(struct FD_LIST_ITEM *LOG);
 
 
 
@@ -359,7 +371,7 @@ static Q_element * alloc_Q_list_inside_page(Q_element * tail, int lock) {
     size_t n_of_Qe_in_one_page = pagesize / sizeof (Q_element);
     //pagesize/sizeof (Q_element)
 
-    Q_element *Q_e_ptr = x_alloc_aligned_zeroed_locked_page(pagesize, lock);
+    Q_element *Q_e_ptr = x_alloc_aligned_zeroed_locked_page(pagesize, lock);             //FREE
     assert_msg(Q_e_ptr != NULL, "x_alloc_aligned_zeroed_locked_page return NULL");
 
     Q_e_ptr->is_alloc_addr = 1;
@@ -367,7 +379,7 @@ static Q_element * alloc_Q_list_inside_page(Q_element * tail, int lock) {
     for (int e = 0; e < (n_of_Qe_in_one_page - 1); e++) {
         //Q_e_ptr[e].params=calloc(PARAMS_FIXED_NUM,sizeof(uintptr_t));
         Q_e_ptr[e].next = &(Q_e_ptr[e + 1]);
-        Q_e_ptr[e].full_string = x_alloc_aligned_zeroed_locked(logLogFullBufLen, -1);
+        Q_e_ptr[e].full_string = x_alloc_aligned_zeroed_locked(logLogFullBufLen, -1); //FREE
         Q_e_ptr[e].full_string_len = pagesize;
     }
     //alloc one page for logFull, less?
@@ -429,21 +441,25 @@ static void * logWrite_thread(void *logFile){
     }
     
     //activate logs
+    
     LOG->insert_forbidden = 0;
-    
-    
     LOG->logFlushThreadStarted=1;
+    
+    
     pthread_mutex_unlock(&af_thread_startup_mutex);
     
-    //ready to exit counter (+3 time get state: write=0 and all files are locked)
+    //ready to exit counter (+3 time get state: write=0 and all insert forbidden)
     int ready_to_exit = 0;
     
     //endless check and write
     for(;;) {
         
         
+        //lock for some vars antil while() ends, then sleep (sleep out of lock!)
+        pthread_mutex_lock(&LOG->FD_LIST_ITEM_mutex);
 
         if (UNLIKELY(LOG->requestForLogsTruncate)) {
+            
             LOG->requestForLogsTruncate = 0;
             
             FILE *F = LOG->FD;
@@ -465,13 +481,11 @@ static void * logWrite_thread(void *logFile){
                     }
                 }
             }
-
-            
         }
 
         //счетчик того сколько всесего записей сделано по всем файлам. если ни одной, то значит ничего не происходит, поспим немного
         long write_cnt = 0;
-        int insert_forbidden_FD = 0;
+        //int insert_forbidden_FD = 0;
 
         
         
@@ -483,16 +497,14 @@ static void * logWrite_thread(void *logFile){
             
             FILE *F = LOG->FD;
             
-            if(LOG->insert_forbidden)
-                insert_forbidden_FD+=1;
+            //if(LOG->insert_forbidden)                insert_forbidden_FD+=1;
 
             //обратное условие проверим через три строки. там его надо каждый раз проверять
             
             LOG_QUEUE *Q = &(LOG->QUEUE);
 
-            //счетчик чтобы в каждый файл писать по немного
-            //long write_limit_cnt = 0;
-            //Если актуальный и не пустой  и за раз не больше 10000
+            
+            
             
             
             //по списку одно условие - есть следующий эллемент
@@ -739,8 +751,8 @@ static void * logWrite_thread(void *logFile){
 
             }//while
 
-        
-        
+        //job done for now. unlock and sleep
+        pthread_mutex_unlock(&LOG->FD_LIST_ITEM_mutex);
         
         //ни одной записи? exit или спать!
         if (write_cnt == 0) {
@@ -780,6 +792,7 @@ static void * logWrite_thread(void *logFile){
         }*/
         if (Flush.tv_sec > prevFlush.tv_sec) { //HARDCODE flsuh every 1 sec
             
+            pthread_mutex_lock(&LOG->FD_LIST_ITEM_mutex);
             if (LOG->FD != NULL) {
                 errno = 0;
                 fputs_unlocked("#fflush\n", LOG->FD);
@@ -794,10 +807,13 @@ static void * logWrite_thread(void *logFile){
             }
             
             prevFlush.tv_sec = Flush.tv_sec + logFlush_fflush_sec;
+            
+            pthread_mutex_unlock(&LOG->FD_LIST_ITEM_mutex);
         }
         
         
-        //*/
+        
+        
     }//endlessCycle
 
 
@@ -805,7 +821,7 @@ static void * logWrite_thread(void *logFile){
     //the only return point!!!
 logFlush_thread__exit:
     LOG->logFlushThreadStarted=0;
-    //pthread_mutex_unlock(&FD_LIST_mutex);
+    
     
     return NULL;
 }
@@ -910,28 +926,34 @@ static int logWriterStart(struct FD_LIST_ITEM *LOG, int bind_cpu) {
 
 }
 
-int oroWriterStop(long int wait_usec){
+int oroLogClose(Poro_t logFile, long int wait_usec){
 
     //check for logFlushThreadStarted=1 ????
 
         __suseconds_t wait=wait_usec;
+        
+        struct FD_LIST_ITEM *LOG=(struct FD_LIST_ITEM *)logFile;
 
     
-
-        pthread_mutex_lock(&FD_LIST_mutex);
-
-        for (struct FD_LIST_ITEM * LOG=FD_LIST;LOG;LOG=LOG->next) {
-            LOG->insert_forbidden = 1;
-        }
+        
+        pthread_mutex_lock(&LOG->FD_LIST_ITEM_mutex);
+        LOG->insert_forbidden = 1;
+        pthread_mutex_unlock(&LOG->FD_LIST_ITEM_mutex);
+        
 
 
 
         //rewrite mutex use!!!
         for(;;) {
+            
+            
             int still_running=0;
-            for (struct FD_LIST_ITEM * LOG=FD_LIST;LOG;LOG=LOG->next) {
-                still_running+=LOG->logFlushThreadStarted;
-            }
+            
+            //logFlushThreadStarted sets in FlusThread only. 
+            //Can we bee shure logFlushThreadStarted=0 means Thread is dead?
+            still_running = LOG->logFlushThreadStarted;
+            
+            
             if(still_running==0)
                 break;
             
@@ -945,28 +967,27 @@ int oroWriterStop(long int wait_usec){
 
         }
 
-        //logFlush thread already finish (on exit it should unlock FD_ARR_mutex)
+        //Hope logFlush thread already finish
 
-        //join наверно лишне, но вдруг там какая-то чистка делается, надо уточнить
-        for (struct FD_LIST_ITEM * LOG = FD_LIST; LOG; LOG = LOG->next) {
+        //join for cleanup
 
-            if (LOG->logFlushThread != 0) {
-                int r = 0;
-                if ((r = pthread_join(LOG->logFlushThread, NULL)) != 0) {
-                    if (error_fun)error_fun(
-                            ERR_MESSAGE("pthread_join to logFlush_thread error %i: %s\n", r, strerror(r))
-                            );
-                    //continue, not fatal
-                    //may be not statrted
-                }
-            }
+        
+        int r = 0;
+        if ((r = pthread_join(LOG->logFlushThread, NULL)) != 0) {
+            if (error_fun)error_fun(
+                    ERR_MESSAGE("pthread_join to logFlush_thread error %i: %s\n", r, strerror(r))
+                    );
+            //continue, not fatal
+            //may be not statrted
         }
         
+        
+        
         //Close all FD, free Q, io_buf, ...
-        logCleaup(error_fun);
+        logCleaup(LOG);
         
         
-        pthread_mutex_unlock(&FD_LIST_mutex);
+        //pthread_mutex_unlock(&FD_LIST_mutex);
         
 
         return 0;
@@ -990,109 +1011,161 @@ static unsigned long logQueueSize(Poro_t logFile, void (*error_fun)(char *fstrin
 
 
 //DANGER!! ACHTUNG!!! shuold be called ONLY from logWriteSTOP
-static int logCleaup(){ 
-    //expect FD_LIST_mutext is locked!!!!
+static int logCleaup(struct FD_LIST_ITEM *LOG){ 
     
-    for (struct FD_LIST_ITEM * LOG=FD_LIST;LOG;LOG=LOG->next) {
+    
+    
+    assert_msg(LOG->insert_forbidden == 1, "LOG must be locked already!");
+    
+    //lock if LogFixed/LogRelaxed/logFull is running
+    pthread_spin_lock(&LOG->insert_lock);
+    
             //FILE *F = FD_ARR[N].FD;
-            LOG_QUEUE *Q = &(LOG->QUEUE);
-            
-            //мы не должны попадать сюда с полной очередью
-            assert_msg(Q->head==Q->head, "Cleanup non empty Queue");
-            
-            if(LOG->FD){
-            fprintf(LOG->FD, "#Closed %s.\n",LOG->QUEUE.cnt_in==LOG->QUEUE.cnt_out?"normally":" truncated. IN<>OUT"   );
-            
-            errno=0;
-            if(fflush(LOG->FD) != 0){
-                if(error_fun)
-                    error_fun(ERR_MESSAGE("fflush on %s: %s\n",LOG->log_filename,strerror(errno))
-                            );
-            }
-            errno=0;
-            if(fclose(LOG->FD) != 0){
-                if(error_fun)
-                    error_fun(ERR_MESSAGE("fclose on %s: %s\n",LOG->log_filename,strerror(errno))
-                            );
-            }
-            LOG->FD = NULL;
-            
-            
-            }
-            
-            //лог должен быть уже закрыт
-            //assert_msg(FD_ARR[N].FD == NULL, "Cleanup non closed FD");
-            
-            //free setvbuf allocation
-            if(LOG->custom_io_buf){
-                free(LOG->custom_io_buf);
-                LOG->custom_io_buf=NULL;
-            }
-            
-            if(LOG->log_filename){
-                free(LOG->log_filename);
-                LOG->log_filename=NULL;
-            }
+    LOG_QUEUE *Q = &(LOG->QUEUE);
 
-            //т.к. аллокация страницами мы не можем осободить серединку
-            //free(Q->head);
-            void *free_later=NULL;
-            //если так поучилось, что сдесь залип первый эллемент, мы не можем его высвободить, т.к. будем сейчас ходить по связанным с ним эллементам
-            //запомним и освободим позже
-            if(Q->head){
-                if(Q->head->is_alloc_addr){
-                    free_later=Q->head;
-                }
-            Q->head=NULL;
-            }
-
-
-            if(Q->return_tail){
-               
-                long n=0;
-                generic_list *L = NULL;
-                
-                for(Q_element *tmp=Q->return_tail;tmp!=NULL;tmp=tmp->next){
-                    if(tmp->is_alloc_addr){
-                        generic_list *newL = calloc(1,sizeof(generic_list));
-                        newL->p=tmp;
-                        newL->n=++n;
-                        newL->next=L;
-                        L=newL;
-                    }
-                }
-                for(generic_list *tmp=L;tmp!=NULL;){
-                    generic_list *next=tmp->next;
-                    free(tmp->p);
-                    free(tmp);
-                    tmp=next;
-                }
-                
-                Q->return_tail=NULL;
-
-            }
-            if(free_later){
-                free(free_later);
-                free_later=NULL;
-            }
-            
-          
-            
-    }
     
-    //race!!! if logLog* run same time
-    FD_LIST_ITEM_NUM=0;
-    for (struct FD_LIST_ITEM * LOG=FD_LIST;LOG;){
-        struct FD_LIST_ITEM *next=LOG->next;
-        //fprintf(stderr,"FREE LOG %p\n",LOG);
-        free(LOG);
-        LOG=next;
+    //мы не должны попадать сюда с полной очередью
+    assert_msg(Q->head==Q->tail, "Cleanup non empty Queue");
+    
+
+    pthread_mutex_lock(&LOG->FD_LIST_ITEM_mutex);
+    
+    if(LOG->FD){
+    fprintf(LOG->FD, "#Closed %s.\n",LOG->QUEUE.cnt_in==LOG->QUEUE.cnt_out?"normally":" truncated. IN<>OUT"   );
+
+    errno=0;
+    if(fflush(LOG->FD) != 0){
+        if(error_fun)
+            error_fun(ERR_MESSAGE("fflush on %s: %s\n",LOG->log_filename,strerror(errno))
+                    );
     }
+    errno=0;
+    if(fclose(LOG->FD) != 0){
+        if(error_fun)
+            error_fun(ERR_MESSAGE("fclose on %s: %s\n",LOG->log_filename,strerror(errno))
+                    );
+    }
+    LOG->FD = NULL;
+
+
+    }
+    pthread_mutex_unlock(&LOG->FD_LIST_ITEM_mutex);
+
+    //лог должен быть уже закрыт
+    //assert_msg(FD_ARR[N].FD == NULL, "Cleanup non closed FD");
+
+    //free setvbuf allocation
+    if(LOG->custom_io_buf){
+        free(LOG->custom_io_buf);
+        LOG->custom_io_buf=NULL;
+    }
+
+    if(LOG->log_filename){
+        free(LOG->log_filename);
+        LOG->log_filename=NULL;
+    }
+
+    //т.к. аллокация страницами мы не можем осободить серединку
+    //free(Q->head);
+    void *free_later=NULL;
+    //если так поучилось, что сдесь залип первый эллемент, мы не можем его высвободить, т.к. будем сейчас ходить по связанным с ним эллементам
+    //запомним и освободим позже
+    //Q->head==Q->tail
+    
+    if(Q->head){
+        
+        if(Q->head->full_string){
+                free(Q->head->full_string);
+                Q->head->full_string=NULL;
+                Q->head->full_string_len=0;
+            }
+            
+            memset(Q->head->params,0,sizeof(Q->head->params));
+            Q->head->format_string=NULL;
+            Q->head->num=0;
+            Q->head->params_free_mask=0;
+            memset(&Q->head->realtime,0,sizeof(Q->head->realtime));
+            
+        if(Q->head->is_alloc_addr){
+            free_later=Q->head;
+        }
+    Q->tail=Q->head=NULL;
+    }
+
+
+    int c_free=0;
+    int c_c=0;
+    int c_pages=0;
+    if(Q->return_tail){
+
+        long n=0;
+        generic_list *L = NULL;
+
+        for(Q_element *tmp=Q->return_tail;tmp!=NULL;tmp=tmp->next){
+            //free and zerro all inside
+            c_c++;
+            if(tmp->full_string){
+                free(tmp->full_string);
+                tmp->full_string=NULL;
+                tmp->full_string_len=0;
+                c_free++;
+                
+            }
+            
+            memset(tmp->params,0,sizeof(tmp->params));
+            tmp->format_string=NULL;
+            tmp->num=0;
+            tmp->params_free_mask=0;
+            memset(&tmp->realtime,0,sizeof(tmp->realtime));
+            
+            //collect addrs to free later
+            if(tmp->is_alloc_addr){
+                c_pages++;
+                generic_list *newL = calloc(1,sizeof(generic_list));
+                newL->p=tmp;
+                newL->n=++n;
+                newL->next=L;
+                L=newL;
+            }
+        }
+        for(generic_list *tmp=L;tmp!=NULL;){
+            generic_list *next=tmp->next;
+            free(tmp->p);
+            free(tmp);
+            tmp=next;
+        }
+
+        Q->return_tail=NULL;
+        
+
+    }
+    if(free_later){
+        free(free_later);
+        free_later=NULL;
+    }
+
+    Q->head=Q->return_head=Q->return_tail=Q->tail=NULL;
+
+
+    pthread_spin_unlock(&LOG->insert_lock);
+
+
+
         
     
     
     return 0;
     
+    
+}
+
+//not used by now
+void oroLogDestroy(Poro_t logFile){
+    
+    
+    struct FD_LIST_ITEM *LOG=(struct FD_LIST_ITEM *)logFile;
+    
+    free(LOG);
     
 }
 
@@ -1147,13 +1220,6 @@ Poro_t oroLogOpen(oro_attrs_t config){
     //как быть с возможно параллельным запуском LogOpen?
     //сменить try на просто lock (все вроде так сделано что просто работа с FD_LIST терьует lock. и только на время.
     //так что смело можно менять try на просто lock
-    int mtx = pthread_mutex_trylock(&FD_LIST_mutex);
-    if(mtx != 0){
-        if(error_fun)error_fun(
-                ERR_MESSAGE("Looks like running LogOpen() in parallel\n")
-                );
-        return NULL;
-    }
     
     
     //assert(mtx==0);
@@ -1171,7 +1237,7 @@ Poro_t oroLogOpen(oro_attrs_t config){
     //int p = PTHREAD_PROCESS_PRIVATE;
     //errno=0;
     assert_msg(
-            pthread_spin_init(&(LOG->QUEUE.insert_lock),PTHREAD_PROCESS_PRIVATE) == 0 
+            pthread_spin_init(&(LOG->insert_lock),PTHREAD_PROCESS_PRIVATE) == 0 
             , "pthread_spin_init FAILed");
         
     //? memset before?
@@ -1380,10 +1446,6 @@ Poro_t oroLogOpen(oro_attrs_t config){
     
     
 
-    /*
-     * ПЕРЕНЕСТИ!!!! аллокацию очереди после открытия файла!!!
-     * а то какая-то ерунда получуется
-     */
 
     size_t n_of_Qe_in_one_page = pagesize / sizeof (Q_element);
     config.return_q = (((config.return_q - 1) / n_of_Qe_in_one_page) + 1) * n_of_Qe_in_one_page;
@@ -1443,30 +1505,12 @@ Poro_t oroLogOpen(oro_attrs_t config){
     //until logFlush starts
     LOG->insert_forbidden = 1;
     
-    //just for test. only Fixed and Relaxed is affected by lock. maybe make _unlocked fun var?
-    if(config.nospinlock == -1)
-        LOG->withlock = 0;
-    else
-        LOG->withlock = 1;
+    
     
     //LOG->do_mlock=config.do_mlock;
     
     
     //insert new log to end of list
-    if(FD_LIST == NULL){
-        FD_LIST=LOG;
-        FD_LIST_ITEM_NUM=1;
-    }
-    else{
-
-        struct FD_LIST_ITEM * F = FD_LIST;
-        while(F->next)
-            F = F->next;
-        //mistake????   should be `last next`=LOG
-        F->next=LOG;
-        FD_LIST_ITEM_NUM+=1;
-        
-    }//realloc
     
     
     if(logWriterStart(LOG,config.bind_cpu)!=0){
@@ -1477,12 +1521,11 @@ Poro_t oroLogOpen(oro_attrs_t config){
     
     //the only exit point!!!!
     
-    pthread_mutex_unlock(&FD_LIST_mutex);
+    
     return (Poro_t)LOG;
 
 logOpen__exit:    
-    pthread_mutex_unlock(&FD_LIST_mutex);
-    return 0;
+    return NULL;
 }
 
 static void logRedirect_stderr_f(Poro_t logFile, const char *funname, struct timespec time, const char* format, ...) {
@@ -1610,6 +1653,7 @@ void oroLogFixed(Poro_t logFile, size_t NUM, const char* format,  ...){
     
     va_list arglist;
     
+    pthread_spin_lock(&LOG->insert_lock);
 
     if(UNLIKELY(LOG->insert_forbidden == 1)){
         
@@ -1629,7 +1673,7 @@ void oroLogFixed(Poro_t logFile, size_t NUM, const char* format,  ...){
     
 //несколько тредов будут разбирать список, нужна блокировка. это конечно неахти
   
-    /*if(LOG->withlock) */pthread_spin_lock(&(Q->insert_lock));
+    /*if(LOG->withlock) */
     
     //add some to Q if it is empty
     if(UNLIKELY(Q->return_tail->next == NULL)){
@@ -1643,7 +1687,7 @@ void oroLogFixed(Poro_t logFile, size_t NUM, const char* format,  ...){
     Q->return_tail = Q->return_tail->next;
     
 
-    /*if(LOG->withlock) */pthread_spin_unlock(&(Q->insert_lock));
+    /*if(LOG->withlock) *///pthread_spin_unlock(&(Q->insert_lock));
    
     
     //MFENCE;
@@ -1662,145 +1706,7 @@ void oroLogFixed(Poro_t logFile, size_t NUM, const char* format,  ...){
         p[num] = va_arg(arglist,uintptr_t);
     }
     
-    /*switch(NUM){
-
-#if PARAMS_FIXED_NUM > 32
-FATAL CONFIG  ERROR!!!!  PARAMS_FIXED_NUM > 32  !!!!!
-#endif
-        
-        
-#if PARAMS_FIXED_NUM > 31
-        case 32:
-            p[31]=va_arg(arglist,uintptr_t);
-#endif
-#if PARAMS_FIXED_NUM > 30
-        case 31:
-            p[30]=va_arg(arglist,uintptr_t);
-#endif
-#if PARAMS_FIXED_NUM > 29
-        case 30:
-            p[29]=va_arg(arglist,uintptr_t);
-#endif
-#if PARAMS_FIXED_NUM > 28
-        case 29:
-            p[28]=va_arg(arglist,uintptr_t);
-#endif
-#if PARAMS_FIXED_NUM > 27
-        case 28:
-            p[27]=va_arg(arglist,uintptr_t);
-#endif
-#if PARAMS_FIXED_NUM > 26
-        case 27:
-            p[26]=va_arg(arglist,uintptr_t);
-#endif
-#if PARAMS_FIXED_NUM > 25
-        case 26:
-            p[25]=va_arg(arglist,uintptr_t);
-#endif
-#if PARAMS_FIXED_NUM > 24
-        case 25:
-            p[24]=va_arg(arglist,uintptr_t);
-#endif
-#if PARAMS_FIXED_NUM > 23
-        case 24:
-            p[23]=va_arg(arglist,uintptr_t);
-#endif
-#if PARAMS_FIXED_NUM > 22
-        case 23:
-            p[22]=va_arg(arglist,uintptr_t);
-#endif
-#if PARAMS_FIXED_NUM > 21
-        case 22:
-            p[21]=va_arg(arglist,uintptr_t);
-#endif
-#if PARAMS_FIXED_NUM > 20
-        case 21:
-            p[20]=va_arg(arglist,uintptr_t);
-#endif
-#if PARAMS_FIXED_NUM > 19
-        case 20:
-            p[19]=va_arg(arglist,uintptr_t);
-#endif
-#if PARAMS_FIXED_NUM > 18
-        case 19:
-            p[18]=va_arg(arglist,uintptr_t);
-#endif
-#if PARAMS_FIXED_NUM > 17
-        case 18:
-            p[17]=va_arg(arglist,uintptr_t);
-#endif
-#if PARAMS_FIXED_NUM > 16
-        case 17:
-            p[16]=va_arg(arglist,uintptr_t);
-#endif
-#if PARAMS_FIXED_NUM > 15
-        case 16:
-            p[15]=va_arg(arglist,uintptr_t);
-#endif
-#if PARAMS_FIXED_NUM > 14
-        case 15:
-            p[14]=va_arg(arglist,uintptr_t);
-#endif
-#if PARAMS_FIXED_NUM > 13
-        case 14:
-            p[13]=va_arg(arglist,uintptr_t);
-#endif
-#if PARAMS_FIXED_NUM > 12
-        case 13:
-            p[12]=va_arg(arglist,uintptr_t);
-#endif
-#if PARAMS_FIXED_NUM > 11
-        case 12:
-            p[11]=va_arg(arglist,uintptr_t);
-#endif
-#if PARAMS_FIXED_NUM > 10
-        case 11:
-            p[10]=va_arg(arglist,uintptr_t);
-#endif
-#if PARAMS_FIXED_NUM > 9
-        case 10:
-            p[9]=va_arg(arglist,uintptr_t);
-#endif
-#if PARAMS_FIXED_NUM > 8
-        case 9:
-            p[8]=va_arg(arglist,uintptr_t);
-#endif
-#if PARAMS_FIXED_NUM > 7
-        case 8:
-            p[7]=va_arg(arglist,uintptr_t);
-#endif
-#if PARAMS_FIXED_NUM > 6
-        case 7:
-            p[6]=va_arg(arglist,uintptr_t);
-#endif
-#if PARAMS_FIXED_NUM > 5
-        case 6:
-            p[5]=va_arg(arglist,uintptr_t);
-#endif
-#if PARAMS_FIXED_NUM > 4
-        case 5:
-            p[4]=va_arg(arglist,uintptr_t);
-#endif
-#if PARAMS_FIXED_NUM > 3
-        case 4:
-            p[3]=va_arg(arglist,uintptr_t);
-#endif
-#if PARAMS_FIXED_NUM > 2
-        case 3:
-            p[2]=va_arg(arglist,uintptr_t);
-#endif
-#if PARAMS_FIXED_NUM > 1
-        case 2:
-            p[1]=va_arg(arglist,uintptr_t);
-#endif
-#if PARAMS_FIXED_NUM > 0
-        case 1:
-            p[0]=va_arg(arglist,uintptr_t);
-#endif
-        case 0:
-        default:
-            break;
-    }*/
+    
     va_end(arglist);
     
     ENTRY->format_string = format;
@@ -1812,14 +1718,14 @@ FATAL CONFIG  ERROR!!!!  PARAMS_FIXED_NUM > 32  !!!!!
     
 //    Q_NEXT_FENCE;
     
-    /*if(LOG->withlock) */pthread_spin_lock(&(Q->insert_lock));
+    /*if(LOG->withlock) */ //pthread_spin_lock(&(Q->insert_lock));
     
     /*next!*/
     Q->head->next=ENTRY;
     Q->head=ENTRY;
     //Q->cnt_in+=1;
     
-    /*if(LOG->withlock) */pthread_spin_unlock(&(Q->insert_lock));
+    pthread_spin_unlock(&LOG->insert_lock);
     
     
 }
@@ -1844,6 +1750,8 @@ void oroLogRelaxed(Poro_t logFile, size_t NUM, const char* format,  ...) {
 
     va_list arglist;
     
+    pthread_spin_lock(&LOG->insert_lock);
+    
     if(UNLIKELY(LOG->insert_forbidden == 1)){
         va_start(arglist, format);
         logRedirect_stderr(logFile,__func__,time,format,arglist);
@@ -1855,7 +1763,7 @@ void oroLogRelaxed(Poro_t logFile, size_t NUM, const char* format,  ...) {
     Q_element *ENTRY;
     LOG_QUEUE *Q = &(LOG->QUEUE);
     
-    /*if(LOG->withlock) */pthread_spin_lock(&(Q->insert_lock));
+
     
     //add some to Q if it is empty
     if(UNLIKELY(Q->return_tail->next == NULL)){
@@ -1868,7 +1776,7 @@ void oroLogRelaxed(Poro_t logFile, size_t NUM, const char* format,  ...) {
     ENTRY = Q->return_tail;
     Q->return_tail = Q->return_tail->next;
     
-    /*if(LOG->withlock) */pthread_spin_unlock(&(Q->insert_lock));
+    
     
     //а нада?
     //assert_msg(ENTRY != NULL,"Got non valid Queue element pointer");
@@ -1956,13 +1864,13 @@ exit_parsing:
     
 //    Q_NEXT_FENCE;
     
-    /*if(LOG->withlock) */pthread_spin_lock(&(Q->insert_lock));
+    
     
     Q->head->next=ENTRY;
     Q->head=ENTRY;
     //Q->cnt_in+=1;
 
-    /*if(LOG->withlock) */pthread_spin_unlock(&(Q->insert_lock));
+    pthread_spin_unlock(&LOG->insert_lock);
 
     
 }
@@ -1990,6 +1898,8 @@ void oroLogRelaxed_X(Poro_t logFile, size_t NUM, const char* format,  ...) {
 
     va_list arglist;
     
+    pthread_spin_lock(&LOG->insert_lock);
+    
     if(UNLIKELY(LOG->insert_forbidden == 1)){
         va_start(arglist, format);
         logRedirect_stderr(logFile,__func__,time,format,arglist);
@@ -2001,7 +1911,7 @@ void oroLogRelaxed_X(Poro_t logFile, size_t NUM, const char* format,  ...) {
     Q_element *ENTRY;
     LOG_QUEUE *Q = &(LOG->QUEUE);
     
-    /*if(LOG->withlock) */pthread_spin_lock(&(Q->insert_lock));
+    /*if(LOG->withlock) */
     
     //add some to Q if it is empty
     if(UNLIKELY(Q->return_tail->next == NULL)){
@@ -2014,8 +1924,8 @@ void oroLogRelaxed_X(Poro_t logFile, size_t NUM, const char* format,  ...) {
     ENTRY = Q->return_tail;
     Q->return_tail = Q->return_tail->next;
     
-    /*if(LOG->withlock) */pthread_spin_unlock(&(Q->insert_lock));
-        
+    
+    
     //а нада?
     //assert_msg(ENTRY != NULL,"Got non valid Queue element pointer");
     
@@ -2093,13 +2003,13 @@ exit_parsing:
     
 //    Q_NEXT_FENCE;
     
-    /*if(LOG->withlock) */pthread_spin_lock(&(Q->insert_lock));
+    
     
     Q->head->next=ENTRY;
     Q->head=ENTRY;
     //Q->cnt_in+=1;
 
-    /*if(LOG->withlock) */pthread_spin_unlock(&(Q->insert_lock));
+    pthread_spin_unlock(&LOG->insert_lock);
 
     
 }
@@ -2133,6 +2043,7 @@ size_t oroLogFull(Poro_t logFile, size_t expecting_byte, const char* format,  ..
     
     va_list arglist;
 
+    pthread_spin_lock(&LOG->insert_lock);
     
     if(UNLIKELY(LOG->insert_forbidden == 1)){
         va_start(arglist, format);
@@ -2146,7 +2057,7 @@ size_t oroLogFull(Poro_t logFile, size_t expecting_byte, const char* format,  ..
     Q = &(LOG->QUEUE);
 
     
-    /*if(LOG->withlock) */pthread_spin_lock(&(Q->insert_lock));
+    /*if(LOG->withlock) */
     
     //add some to Q if it is empty
     if(UNLIKELY(Q->return_tail->next == NULL)){
@@ -2159,7 +2070,7 @@ size_t oroLogFull(Poro_t logFile, size_t expecting_byte, const char* format,  ..
     ENTRY = Q->return_tail;
     Q->return_tail = Q->return_tail->next;
 
-    /*if(LOG->withlock) */pthread_spin_unlock(&(Q->insert_lock));
+    
       
     //а нада?
     //assert_msg(ENTRY != NULL,"Got non valid Queue element pointer");
@@ -2224,14 +2135,13 @@ size_t oroLogFull(Poro_t logFile, size_t expecting_byte, const char* format,  ..
     
 //    Q_NEXT_FENCE;
     
-    /*if(LOG->withlock) */pthread_spin_lock(&(Q->insert_lock));
     
     Q->head->next=ENTRY;
     Q->head=ENTRY;
     //Q->cnt_in+=1;
 
 
-    /*if(LOG->withlock) */pthread_spin_unlock(&(Q->insert_lock));
+    pthread_spin_unlock(&LOG->insert_lock);
     
     return expecting_byte;
 }

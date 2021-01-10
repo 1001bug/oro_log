@@ -107,10 +107,14 @@ extern "C" {
     void oroLogTruncate(Poro_t logFile);
 
     
-    int oroWriterStop(__suseconds_t wait);
+    int oroLogClose(Poro_t logFile, long int wait_usec);
+    
     Poro_t oroLogOpen(oro_attrs_t config);
     
     void oroInit(int time__source,int timestamp_utc,void (*error__fun)(char *fstring, ...));
+    
+    void oroLogDestroy(Poro_t logFile);
+    
 
     //Autocount args for N=1+  because some problem with ##__VA_ARGS__. In macro expand it everything ok, but in runtime 0 args gives count=1
 #define oroLogFixedA(logFile,format,...) do{ \

@@ -293,7 +293,7 @@ int main(int argc, char** argv) {
     oroLogFixedA(LOG, "logLogFixed WRONG   entry str='%s' %u with TIME=%li%09li anf current sec number %l ................... " ,">str<",1,2,3,4);
     oroLogRelaxedA(LOG, "oroLogRelaxed WRONG  entry str='%s' %u with TIME=%li%09li anf current sec number %l................. " ,">str<",1,2,3);
     oroLogRelaxed_XA(LOG, "oroLogRelaxed WRONG  entry str='%s' %u with TIME=%li%09li anf current sec number %l................. " ,">str<",1,2,3);
-    oroLogFull(LOG, 25, "oroLogRelaxed WRONG  entry str='%s' %u with TIME=%li%09li anf current sec number %l ................ " ,">str<",1,2,3,4);
+    //(LOG, 25, "oroLogRelaxed WRONG  entry str='%s' %u with TIME=%li%09li anf current sec number %l ................ " ,">str<",1,2,3,4);
     oroLogFixed5_unlocked(LOG_u,"asasasas",0,0,0,0,0);
     
 //    logLogFixedA(LOG, "1ogLogFixed   entry str='s' u with TIME=li09li anf current sec number li an more over and so on llu:llu");
@@ -600,7 +600,7 @@ int main(int argc, char** argv) {
     PRINT_STAT("logLogRelaxed", rdtscp_S, rdtscp_E, rdtscp_dif, NN, CYCLES);
     sleep(1);
 
-    
+    /*
     
     for (int r = 0; r < NN; r++) {
         RDTSCP(start);
@@ -633,7 +633,7 @@ int main(int argc, char** argv) {
     PRINT_STAT("logLogFulla", rdtscp_S, rdtscp_E, rdtscp_dif, NN, CYCLES);
     sleep(1);
 
-
+*/
     fflush(OUT);
     for (int r = 0; r < NN; r++) {
         RDTSCP(start);
@@ -700,12 +700,14 @@ end:
 
 
 
-    while(oroWriterStop(1000000) != 0){
-        fprintf(stderr,"Waiting for logFlush finish...\n");
+    while(oroLogClose(LOG,1000000) != 0){
+        fprintf(stderr,"Waiting for writThread to finish...\n");
     }
 
-    fprintf(stderr, "== Cleanup ==\n");
+    
+    fprintf(stderr, "== Cleanup! ==\n");
 
+    oroLogDestroy(LOG);
     /*{
         unsigned long sum = 0;
         unsigned long cnt = 0;
