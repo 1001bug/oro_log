@@ -138,7 +138,7 @@
         <cTool>
           <architecture>2</architecture>
           <standard>3</standard>
-          <commandLine>-O0 -mavx</commandLine>
+          <commandLine>-O2 -mavx</commandLine>
           <warningLevel>2</warningLevel>
         </cTool>
         <linkerTool>
